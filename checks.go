@@ -184,7 +184,8 @@ func getJSON(ctx context.Context, tr *http.Transport, u string, v any) error {
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Accept", "application/dns-json, application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Cache-Control", "no-cache")
 	req.Header.Set("User-Agent", "DNSCheck/1.0")
 	c := &http.Client{Transport: tr, Timeout: 12 * time.Second,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
@@ -547,6 +548,8 @@ func externalCheck(ctx context.Context, host string, rep *Report) ext {
 	}
 
 	final := map[string]externalNodeResult{}
+	var lastPollErr error
+	validPolls := 0
 	for i := 0; i < 20; i++ {
 		select {
 		case <-ctx.Done():
@@ -556,9 +559,11 @@ func externalCheck(ctx context.Context, host string, rep *Report) ext {
 			break
 		}
 		var raw map[string]json.RawMessage
-		if getJSON(ctx, tr, "https://check-host.net/check-result/"+start.RequestID, &raw) != nil {
+		if err := getJSON(ctx, tr, "https://check-host.net/check-result/"+start.RequestID, &raw); err != nil {
+			lastPollErr = err
 			continue
 		}
+		validPolls++
 		// Some API responses may wrap node results in a top-level "results" object.
 		// Normalize that shape before parsing the per-node HTTP result arrays.
 		if wrapped, ok := raw["results"]; ok {
@@ -615,7 +620,11 @@ func externalCheck(ctx context.Context, host string, rep *Report) ext {
 	}
 	sort.Strings(keys)
 	if e.total == 0 {
-		rep.set(rowExt, Info, "External checker returned no results", -1)
+		if validPolls == 0 && lastPollErr != nil {
+			rep.set(rowExt, Info, "External checker could not retrieve results (request failed)", -1)
+		} else {
+			rep.set(rowExt, Info, "External checker returned no completed results; try again", -1)
+		}
 		return e
 	}
 	rows := make([]Row, 0, len(keys))
