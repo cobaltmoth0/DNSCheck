@@ -1,0 +1,35 @@
+name: Go validation
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main, "security/**"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: go-validation-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Set up Go
+        uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5.0.2
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run tests
+        run: go test ./...
+      - name: Run go vet
+        run: go vet ./...
+      - name: Build Windows amd64 executable
+        env:
+          GOOS: windows
+          GOARCH: amd64
+        run: go build -o /tmp/dnscheck-windows-amd64.exe .
