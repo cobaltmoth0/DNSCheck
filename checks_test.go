@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"net"
 	"testing"
 )
@@ -96,13 +95,5 @@ func TestIsSinkhole(t *testing.T) {
 		if parsed := net.ParseIP(ip); parsed == nil || isSinkhole(parsed) {
 			t.Errorf("isSinkhole(%q) = true, want false", ip)
 		}
-	}
-}
-
-func TestDescribeNetErrNilNotExpected(t *testing.T) {
-	// describeNetErr expects a non-nil error; keep this as a guard against
-	// accidentally changing its call contract without making nil handling safe.
-	if !errors.Is(errors.New("sample"), errors.New("sample")) {
-		t.Skip("errors.Is compares error identity; no runtime behavior under test")
 	}
 }
