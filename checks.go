@@ -532,7 +532,7 @@ func externalCheck(ctx context.Context, host string, rep *Report) ext {
 	rep.set(rowExt, Running, "Asking check-host.net...", -1)
 	tr := noProxyTransport()
 	defer tr.CloseIdleConnections()
-	ctx, cancel := context.WithTimeout(ctx, 28*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 48*time.Second)
 	defer cancel()
 
 	var start struct {
@@ -547,10 +547,10 @@ func externalCheck(ctx context.Context, host string, rep *Report) ext {
 	}
 
 	final := map[string]externalNodeResult{}
-	for i := 0; i < 10; i++ {
+	for i := 0; i < 20; i++ {
 		select {
 		case <-ctx.Done():
-		case <-time.After(2500 * time.Millisecond):
+		case <-time.After(2 * time.Second):
 		}
 		if ctx.Err() != nil {
 			break
@@ -559,16 +559,28 @@ func externalCheck(ctx context.Context, host string, rep *Report) ext {
 		if getJSON(ctx, tr, "https://check-host.net/check-result/"+start.RequestID, &raw) != nil {
 			continue
 		}
+		// Some API responses may wrap node results in a top-level "results" object.
+		// Normalize that shape before parsing the per-node HTTP result arrays.
+		if wrapped, ok := raw["results"]; ok {
+			var nested map[string]json.RawMessage
+			if json.Unmarshal(wrapped, &nested) == nil && len(nested) > 0 {
+				raw = nested
+			}
+		}
 		pending := 0
 		for node, rm := range raw {
 			var outer []json.RawMessage
-			if string(rm) == "null" || json.Unmarshal(rm, &outer) != nil || len(outer) == 0 {
+			if strings.TrimSpace(string(rm)) == "null" || json.Unmarshal(rm, &outer) != nil || len(outer) == 0 {
 				pending++
 				continue
 			}
 			var f []any
 			if json.Unmarshal(outer[0], &f) != nil || len(f) < 3 {
-				pending++
+				// A node may still be pending (null/empty), but malformed non-empty
+				// payloads should not prevent already-returned node results being shown.
+				if len(outer) == 1 && strings.TrimSpace(string(outer[0])) == "null" {
+					pending++
+				}
 				continue
 			}
 			nr := externalNodeResult{}
