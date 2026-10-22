@@ -500,6 +500,26 @@ func runLocal(ctx context.Context, host string, rep *Report) local {
 	return l
 }
 
+type externalNodeResult struct {
+	label string
+	ok    bool
+	code  string
+	msg   string
+	sec   float64
+}
+
+// countExternalSuccesses counts only probes the provider explicitly marks successful.
+// An HTTP status code alone is diagnostic information, not proof the check succeeded.
+func countExternalSuccesses(results map[string]externalNodeResult) int {
+	count := 0
+	for _, result := range results {
+		if result.ok {
+			count++
+		}
+	}
+	return count
+}
+
 // ---- External probe (check-host.net) ---------------------------------------
 
 type ext struct {
@@ -526,14 +546,7 @@ func externalCheck(ctx context.Context, host string, rep *Report) ext {
 		return ext{}
 	}
 
-	type nodeRes struct {
-		label string
-		ok    bool
-		code  string
-		msg   string
-		sec   float64
-	}
-	final := map[string]nodeRes{}
+	final := map[string]externalNodeResult{}
 	for i := 0; i < 10; i++ {
 		select {
 		case <-ctx.Done():
@@ -558,7 +571,7 @@ func externalCheck(ctx context.Context, host string, rep *Report) ext {
 				pending++
 				continue
 			}
-			nr := nodeRes{}
+			nr := externalNodeResult{}
 			if v, ok := f[0].(float64); ok {
 				nr.ok = v == 1
 			}
@@ -584,10 +597,8 @@ func externalCheck(ctx context.Context, host string, rep *Report) ext {
 	var sum float64
 	for k, v := range final {
 		keys = append(keys, k)
-		if v.code != "" || v.ok {
-			e.up++
-		}
 		if v.ok {
+			e.up++
 			sum += v.sec * 1000
 		}
 	}
