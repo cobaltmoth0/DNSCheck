@@ -524,7 +524,7 @@ func countExternalSuccesses(results map[string]externalNodeResult) int {
 
 type ext struct {
 	asked bool
-	up    int // nodes that got an HTTP response
+	up    int // nodes the provider explicitly marked successful
 	total int
 }
 
@@ -592,13 +592,12 @@ func externalCheck(ctx context.Context, host string, rep *Report) ext {
 		}
 	}
 
-	e := ext{asked: true, total: len(final)}
+	e := ext{asked: true, total: len(final), up: countExternalSuccesses(final)}
 	keys := make([]string, 0, len(final))
 	var sum float64
 	for k, v := range final {
 		keys = append(keys, k)
 		if v.ok {
-			e.up++
 			sum += v.sec * 1000
 		}
 	}
