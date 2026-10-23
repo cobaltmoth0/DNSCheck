@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"net"
 	"testing"
 )
@@ -95,5 +96,45 @@ func TestIsSinkhole(t *testing.T) {
 		if parsed := net.ParseIP(ip); parsed == nil || isSinkhole(parsed) {
 			t.Errorf("isSinkhole(%q) = true, want false", ip)
 		}
+	}
+}
+
+func TestParseExternalNodeResults(t *testing.T) {
+	fixtures := []struct {
+		name string
+		json string
+		want int
+		pending int
+	}{
+		{
+			name: "plain check result",
+			json: `{"us1.node.check-host.net":[[1,0.13,"OK","200","203.0.113.1"]],"ch1.node.check-host.net":null}`,
+			want: 1, pending: 1,
+		},
+		{
+			name: "extended result wrapper",
+			json: `{"command":"http","created":1735030010,"host":"https://example.com","results":{"us1.node.check-host.net":[[1,0.13,"OK","200","203.0.113.1"]]}}`,
+			want: 1,
+		},
+		{
+			name: "empty result remains pending",
+			json: `{"us1.node.check-host.net":[[null]]}`,
+			pending: 1,
+		},
+	}
+	for _, fixture := range fixtures {
+		t.Run(fixture.name, func(t *testing.T) {
+			var raw map[string]json.RawMessage
+			if err := json.Unmarshal([]byte(fixture.json), &raw); err != nil {
+				t.Fatal(err)
+			}
+			got, pending := parseExternalNodeResults(raw, nil)
+			if len(got) != fixture.want {
+				t.Fatalf("parsed %d nodes, want %d", len(got), fixture.want)
+			}
+			if pending != fixture.pending {
+				t.Fatalf("pending %d nodes, want %d", pending, fixture.pending)
+			}
+		})
 	}
 }
