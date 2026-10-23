@@ -544,7 +544,14 @@ func parseExternalNodeResults(raw map[string]json.RawMessage, nodes map[string][
 			pending++
 			continue
 		}
-		if json.Unmarshal(outer[0], &fields) != nil || len(fields) < 3 {
+		if json.Unmarshal(outer[0], &fields) != nil {
+			continue
+		}
+		if len(fields) == 1 && fields[0] == nil {
+			pending++
+			continue
+		}
+		if len(fields) < 3 {
 			continue
 		}
 		result := externalNodeResult{}
