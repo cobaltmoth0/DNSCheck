@@ -593,8 +593,7 @@ func externalCheck(ctx context.Context, host string, rep *Report) ext {
 	// Request a small number of probes to keep checks quick and within free limits.
 	request := map[string]any{
 		"type": "http",
-		"target": "https://" + host,
-		"limit": 3,
+		"target": host,
 		"locations": []map[string]any{
 			{"country": "US", "limit": 2},
 			{"country": "DE", "limit": 1},
@@ -625,16 +624,26 @@ func externalCheck(ctx context.Context, host string, rep *Report) ext {
 		rep.set(rowExt, Info, "Globalping unavailable from this network", -1)
 		return ext{}
 	}
+	responseBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 256<<10))
+	resp.Body.Close()
 	var created struct {
 		ID string `json:"id"`
 	}
-	decodeErr := json.NewDecoder(io.LimitReader(resp.Body, 256<<10)).Decode(&created)
-	resp.Body.Close()
-	if (resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusOK) || decodeErr != nil || created.ID == "" || !regexp.MustCompile(`^[a-zA-Z0-9-]+$`).MatchString(created.ID) {
+	decodeErr := json.Unmarshal(responseBody, &created)
+	if (resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusOK) || readErr != nil || decodeErr != nil || created.ID == "" || !regexp.MustCompile(`^[a-zA-Z0-9-]+$`).MatchString(created.ID) {
 		if resp.StatusCode == http.StatusTooManyRequests {
 			rep.set(rowExt, Info, "Globalping rate limit reached; try again shortly", -1)
 		} else {
-			rep.set(rowExt, Info, fmt.Sprintf("Globalping request failed (HTTP %d)", resp.StatusCode), -1)
+			var apiErr struct {
+				Error struct { Message string `json:"message"` } `json:"error"`
+			}
+			_ = json.Unmarshal(responseBody, &apiErr)
+			message := strings.TrimSpace(apiErr.Error.Message)
+			if message != "" {
+				rep.set(rowExt, Info, fmt.Sprintf("Globalping request failed (HTTP %d: %s)", resp.StatusCode, message), -1)
+			} else {
+				rep.set(rowExt, Info, fmt.Sprintf("Globalping request failed (HTTP %d)", resp.StatusCode), -1)
+			}
 		}
 		return ext{}
 	}
