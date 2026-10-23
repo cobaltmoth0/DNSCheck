@@ -521,6 +521,52 @@ func countExternalSuccesses(results map[string]externalNodeResult) int {
 	return count
 }
 
+// parseExternalNodeResults accepts both check-result's node map and
+// check-result-extended's documented {"results": {...}} response. A nil node
+// result means that node is still pending; completed nodes are retained.
+func parseExternalNodeResults(raw map[string]json.RawMessage, nodes map[string][]string) (map[string]externalNodeResult, int) {
+	if wrapped, ok := raw["results"]; ok {
+		var nested map[string]json.RawMessage
+		if err := json.Unmarshal(wrapped, &nested); err == nil && len(nested) > 0 {
+			raw = nested
+		}
+	}
+	parsed := make(map[string]externalNodeResult)
+	pending := 0
+	for node, rm := range raw {
+		var outer []json.RawMessage
+		if strings.TrimSpace(string(rm)) == "null" || json.Unmarshal(rm, &outer) != nil || len(outer) == 0 {
+			pending++
+			continue
+		}
+		var fields []any
+		if len(outer) == 1 && strings.TrimSpace(string(outer[0])) == "null" {
+			pending++
+			continue
+		}
+		if json.Unmarshal(outer[0], &fields) != nil || len(fields) < 3 {
+			continue
+		}
+		result := externalNodeResult{}
+		if value, ok := fields[0].(float64); ok {
+			result.ok = value == 1
+		}
+		result.sec, _ = fields[1].(float64)
+		result.msg, _ = fields[2].(string)
+		if len(fields) > 3 {
+			if code, ok := fields[3].(string); ok {
+				result.code = code
+			}
+		}
+		result.label = node
+		if info, ok := nodes[node]; ok && len(info) >= 3 {
+			result.label = info[2] + ", " + info[0]
+		}
+		parsed[node] = result
+	}
+	return parsed, pending
+}
+
 // ---- External probe (check-host.net) ---------------------------------------
 
 type ext struct {
@@ -559,50 +605,15 @@ func externalCheck(ctx context.Context, host string, rep *Report) ext {
 			break
 		}
 		var raw map[string]json.RawMessage
-		if err := getJSON(ctx, tr, "https://check-host.net/check-result/"+start.RequestID, &raw); err != nil {
+		// The extended endpoint explicitly documents the top-level results wrapper.
+		if err := getJSON(ctx, tr, "https://check-host.net/check-result-extended/"+start.RequestID, &raw); err != nil {
 			lastPollErr = err
 			continue
 		}
 		validPolls++
-		// Some API responses may wrap node results in a top-level "results" object.
-		// Normalize that shape before parsing the per-node HTTP result arrays.
-		if wrapped, ok := raw["results"]; ok {
-			var nested map[string]json.RawMessage
-			if json.Unmarshal(wrapped, &nested) == nil && len(nested) > 0 {
-				raw = nested
-			}
-		}
-		pending := 0
-		for node, rm := range raw {
-			var outer []json.RawMessage
-			if strings.TrimSpace(string(rm)) == "null" || json.Unmarshal(rm, &outer) != nil || len(outer) == 0 {
-				pending++
-				continue
-			}
-			var f []any
-			if json.Unmarshal(outer[0], &f) != nil || len(f) < 3 {
-				// A node may still be pending (null/empty), but malformed non-empty
-				// payloads should not prevent already-returned node results being shown.
-				if len(outer) == 1 && strings.TrimSpace(string(outer[0])) == "null" {
-					pending++
-				}
-				continue
-			}
-			nr := externalNodeResult{}
-			if v, ok := f[0].(float64); ok {
-				nr.ok = v == 1
-			}
-			nr.sec, _ = f[1].(float64)
-			nr.msg, _ = f[2].(string)
-			if len(f) > 3 {
-				nr.code, _ = f[3].(string)
-			}
-			loc := node
-			if info, ok := start.Nodes[node]; ok && len(info) >= 3 {
-				loc = info[2] + ", " + info[0]
-			}
-			nr.label = loc
-			final[node] = nr
+		parsed, pending := parseExternalNodeResults(raw, start.Nodes)
+		for node, result := range parsed {
+			final[node] = result
 		}
 		if pending == 0 && len(final) > 0 {
 			break
