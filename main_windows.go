@@ -62,7 +62,6 @@ var (
 	pGetDC          = u32.NewProc("GetDC")
 	pReleaseDC      = u32.NewProc("ReleaseDC")
 	pGetKeyState    = u32.NewProc("GetKeyState")
-	pShellExecute   = syscall.NewLazyDLL("shell32.dll").NewProc("ShellExecuteW")
 
 	pCreateCompatDC  = g32.NewProc("CreateCompatibleDC")
 	pCreateCompatBmp = g32.NewProc("CreateCompatibleBitmap")
@@ -129,9 +128,6 @@ const (
 	wsExClientEdge, wsExAppWindow            = 0x200, 0x40000
 
 	idCheck                 = 1
-	idGlobalping             = 10
-	idCheckHost              = 11
-	idDNSChecker             = 12
 	vkReturn, vkTab, vkCtrl = 0x0D, 0x09, 0x11
 
 	dtCenter, dtRight, dtVCenter, dtSingle = 0x1, 0x2, 0x4, 0x20
@@ -455,9 +451,7 @@ func paintAll(dc uintptr, W, H int32) {
 	// disclaimer
 	dl, dt, dr, db := S(16), S(526), S(winW-16), S(574)
 	etched(dc, dl, dt, dr, db)
-	text(dc, "Disclaimer: DNSCheck is a diagnostic aid and may not always be accurate. Filters, caches, proxies and CDNs can change results. "+
-		"Domain names are sent to Cloudflare (1.1.1.1) and Google (8.8.8.8) for public DNS checks. "+
-		"External reachability is not checked by DNSCheck. Use the buttons above to test from another network.",
+	text(dc, "Diagnostic results may be affected by filters, caches, proxies and CDNs. Domain names are sent to Cloudflare and Google for public DNS checks, and to Globalping to test reachability from remote probes. Do not enter sensitive internal hostnames.",
 		dl+S(8), dt+S(4), dr-S(8), db-S(4), fUI, cBlack, dtVCenter|dtWordBreak)
 
 	// status bar
@@ -486,11 +480,6 @@ func onPaint(h uintptr) {
 }
 
 func invalidate() { pInvalidate.Call(hwnd, 0, 0) }
-
-// Open only fixed, HTTPS destinations; no user-controlled URL reaches ShellExecute.
-func openExternalURL(raw string) {
-	pShellExecute.Call(hwnd, uintptr(unsafe.Pointer(u16("open"))), uintptr(unsafe.Pointer(u16(raw))), 0, 0, 1)
-}
 
 func startCheck() {
 	if running.Load() {
@@ -575,12 +564,6 @@ func wndProc(h, m, w, l uintptr) uintptr {
 		switch uint16(w) {
 		case idCheck:
 			startCheck()
-		case idGlobalping:
-			openExternalURL("https://globalping.io/")
-		case idCheckHost:
-			openExternalURL("https://check-host.net/")
-		case idDNSChecker:
-			openExternalURL("https://dnschecker.org/")
 		}
 		return 0
 	case wmApp:
@@ -653,13 +636,6 @@ func main() {
 		wsChild|wsVisible|wsTabStop|esAutoHScroll, uintptr(S(16)), uintptr(S(52)), uintptr(S(480)), uintptr(S(24)), hwnd, 0, inst, 0))
 	hBtn = must(pCreateWindowEx.Call(0, uintptr(unsafe.Pointer(u16("BUTTON"))), uintptr(unsafe.Pointer(u16("Check"))),
 		wsChild|wsVisible|wsTabStop|bsDefPush, uintptr(S(504)), uintptr(S(51)), uintptr(S(120)), uintptr(S(26)), hwnd, idCheck, inst, 0))
-	links := []struct { title string; id uintptr; x int }{
-		{"Globalping", idGlobalping, 16}, {"Check-Host", idCheckHost, 218}, {"DNSChecker", idDNSChecker, 420},
-	}
-	for _, link := range links {
-		must(pCreateWindowEx.Call(0, uintptr(unsafe.Pointer(u16("BUTTON"))), uintptr(unsafe.Pointer(u16(link.title))),
-			wsChild|wsVisible|wsTabStop|bsDefPush, uintptr(S(link.x)), uintptr(S(488)), uintptr(S(196)), uintptr(S(28)), hwnd, link.id, inst, 0))
-	}
 	for _, c := range []uintptr{hEdit, hBtn} {
 		pSendMessage.Call(c, wmSetFont, fUI, 1)
 	}

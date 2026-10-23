@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"net"
 	"testing"
 )
@@ -40,13 +41,24 @@ func TestParseHost(t *testing.T) {
 	}
 }
 
+func TestDialAnyRejectsUnsafeAddresses(t *testing.T) {
+	for _, address := range []string{"127.0.0.1", "10.0.0.1", "169.254.169.254", "fc00::1"} {
+		t.Run(address, func(t *testing.T) {
+			ip := net.ParseIP(address)
+			if _, _, _, err := dialAny(context.Background(), []net.IP{ip}); err == nil {
+				t.Fatalf("dialAny(%q) unexpectedly allowed a non-public address", address)
+			}
+		})
+	}
+}
+
 func TestIsSinkhole(t *testing.T) {
-	for _, ip := range []string{"127.0.0.1", "10.0.0.1", "169.254.1.2", "0.0.0.0", "224.0.0.1"} {
+	for _, ip := range []string{"127.0.0.1", "10.0.0.1", "169.254.1.2", "0.0.0.0", "224.0.0.1", "fc00::1", "100.64.0.1"} {
 		if parsed := net.ParseIP(ip); parsed == nil || !isSinkhole(parsed) {
 			t.Errorf("isSinkhole(%q) = false, want true", ip)
 		}
 	}
-	for _, ip := range []string{"8.8.8.8", "1.1.1.1"} {
+	for _, ip := range []string{"8.8.8.8", "1.1.1.1", "2001:4860:4860::8888"} {
 		if parsed := net.ParseIP(ip); parsed == nil || isSinkhole(parsed) {
 			t.Errorf("isSinkhole(%q) = true, want false", ip)
 		}

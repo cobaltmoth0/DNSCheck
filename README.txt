@@ -13,9 +13,12 @@ Privacy and network behavior
 ----------------------------
 DNSCheck performs DNS lookups through the computer's configured resolver and
 also queries Cloudflare (1.1.1.1) and Google Public DNS (8.8.8.8) over HTTPS.
-The external reachability check sends the entered hostname, as an HTTPS URL,
-to check-host.net so remote nodes can test it. These requests disclose the
-hostname to those third parties. Do not use this tool with sensitive internal
-hostnames if that disclosure is not acceptable. The application currently
-does not provide a switch to disable the public DNS or external checks.
+The external reachability check sends the entered hostname to Globalping's
+HTTPS API, which schedules HTTPS probes from a small number of remote locations.
+This discloses the hostname to Globalping and its probe operators. Do not use
+sensitive internal hostnames. DNSCheck only initiates outbound requests; it does
+not listen for network connections. Before making local TCP connections, it
+rejects private, loopback, link-local, multicast, and other non-unicast IPs,
+including unsafe addresses in mixed DNS responses. Public DNS and external
+checks currently cannot be disabled.
 
