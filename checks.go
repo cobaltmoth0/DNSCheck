@@ -59,7 +59,7 @@ type Report struct {
 
 func newReport(host string, notify func()) *Report {
 	r := &Report{Host: host, notify: notify}
-	for _, n := range []string{"DNS (this network)", "DNS (public resolver)", "TCP 443 connect", "TLS handshake", "HTTPS response", "External check"} {
+	for _, n := range []string{"DNS (this network)", "DNS (public resolver)", "TCP 443 connect", "TLS handshake", "HTTPS response"} {
 		r.Rows = append(r.Rows, Row{Name: n, Status: Pending, Ms: -1})
 	}
 	return r
@@ -93,7 +93,6 @@ const (
 	rowTCP
 	rowTLS
 	rowHTTP
-	rowExt
 )
 
 const (
@@ -103,7 +102,6 @@ const (
 
 var (
 	labelRe     = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
-	requestRe   = regexp.MustCompile(`^[A-Za-z0-9]{1,32}$`)
 	filterTerms = []string{"goguardian", "securly", "lightspeed", "fortiguard", "fortinet", "iboss",
 		"contentkeeper", "smoothwall", "linewize", "forcepoint", "websense", "opendns", "cisco umbrella",
 		"web filter", "content filter", "blocked by", "access denied by"}
@@ -501,249 +499,12 @@ func runLocal(ctx context.Context, host string, rep *Report) local {
 	return l
 }
 
-type externalNodeResult struct {
-	label string
-	ok    bool
-	code  string
-	msg   string
-	sec   float64
-}
-
-// countExternalSuccesses counts only probes the provider explicitly marks successful.
-// An HTTP status code alone is diagnostic information, not proof the check succeeded.
-func countExternalSuccesses(results map[string]externalNodeResult) int {
-	count := 0
-	for _, result := range results {
-		if result.ok {
-			count++
-		}
-	}
-	return count
-}
-
-// parseExternalNodeResults accepts both check-result's node map and
-// check-result-extended's documented {"results": {...}} response. A nil node
-// result means that node is still pending; completed nodes are retained.
-func parseExternalNodeResults(raw map[string]json.RawMessage, nodes map[string][]string) (map[string]externalNodeResult, int) {
-	if wrapped, ok := raw["results"]; ok {
-		var nested map[string]json.RawMessage
-		if err := json.Unmarshal(wrapped, &nested); err == nil && len(nested) > 0 {
-			raw = nested
-		}
-	}
-	parsed := make(map[string]externalNodeResult)
-	pending := 0
-	for node, rm := range raw {
-		var outer []json.RawMessage
-		if strings.TrimSpace(string(rm)) == "null" || json.Unmarshal(rm, &outer) != nil || len(outer) == 0 {
-			pending++
-			continue
-		}
-		var fields []any
-		if len(outer) == 1 && strings.TrimSpace(string(outer[0])) == "null" {
-			pending++
-			continue
-		}
-		if json.Unmarshal(outer[0], &fields) != nil {
-			continue
-		}
-		if len(fields) == 1 && fields[0] == nil {
-			pending++
-			continue
-		}
-		if len(fields) < 3 {
-			continue
-		}
-		result := externalNodeResult{}
-		if value, ok := fields[0].(float64); ok {
-			result.ok = value == 1
-		}
-		result.sec, _ = fields[1].(float64)
-		result.msg, _ = fields[2].(string)
-		if len(fields) > 3 {
-			if code, ok := fields[3].(string); ok {
-				result.code = code
-			}
-		}
-		result.label = node
-		if info, ok := nodes[node]; ok && len(info) >= 3 {
-			result.label = info[2] + ", " + info[0]
-		}
-		parsed[node] = result
-	}
-	return parsed, pending
-}
-
-// ---- External probe (check-host.net) ---------------------------------------
-
-type ext struct {
-	asked bool
-	up    int // nodes the provider explicitly marked successful
-	total int
-}
-
-func externalCheck(ctx context.Context, host string, rep *Report) ext {
-	rep.set(rowExt, Running, "Checking from Globalping locations...", -1)
-	tr := noProxyTransport()
-	defer tr.CloseIdleConnections()
-	ctx, cancel := context.WithTimeout(ctx, 18*time.Second)
-	defer cancel()
-
-	// Globalping is a public, unauthenticated distributed HTTP measurement API.
-	// Request a small number of probes to keep checks quick and within free limits.
-	request := map[string]any{
-		"type": "http",
-		"target": host,
-		"locations": []map[string]any{
-			{"country": "US", "limit": 2},
-			{"country": "DE", "limit": 1},
-		},
-		"inProgressUpdates": true,
-		"timeout": 8,
-		"measurementOptions": map[string]any{
-			"protocol": "HTTPS",
-			"request": map[string]any{"method": "GET"},
-		},
-	}
-	body, err := json.Marshal(request)
-	if err != nil {
-		rep.set(rowExt, Info, "External checker could not create request", -1)
-		return ext{}
-	}
-	postReq, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.globalping.io/v1/measurements", strings.NewReader(string(body)))
-	if err != nil {
-		rep.set(rowExt, Info, "External checker could not create request", -1)
-		return ext{}
-	}
-	postReq.Header.Set("Accept", "application/json")
-	postReq.Header.Set("Content-Type", "application/json")
-	postReq.Header.Set("User-Agent", "DNSCheck/1.0")
-	client := &http.Client{Transport: tr, Timeout: 7 * time.Second}
-	resp, err := client.Do(postReq)
-	if err != nil {
-		rep.set(rowExt, Info, "Globalping unavailable from this network", -1)
-		return ext{}
-	}
-	responseBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 256<<10))
-	resp.Body.Close()
-	var created struct {
-		ID string `json:"id"`
-	}
-	decodeErr := json.Unmarshal(responseBody, &created)
-	if (resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusOK) || readErr != nil || decodeErr != nil || created.ID == "" || !regexp.MustCompile(`^[a-zA-Z0-9-]+$`).MatchString(created.ID) {
-		if resp.StatusCode == http.StatusTooManyRequests {
-			rep.set(rowExt, Info, "Globalping rate limit reached; try again shortly", -1)
-		} else {
-			var apiErr struct {
-				Error struct { Message string `json:"message"` } `json:"error"`
-			}
-			_ = json.Unmarshal(responseBody, &apiErr)
-			message := strings.TrimSpace(apiErr.Error.Message)
-			if message != "" {
-				rep.set(rowExt, Info, fmt.Sprintf("Globalping request failed (HTTP %d: %s)", resp.StatusCode, message), -1)
-			} else {
-				rep.set(rowExt, Info, fmt.Sprintf("Globalping request failed (HTTP %d)", resp.StatusCode), -1)
-			}
-		}
-		return ext{}
-	}
-
-	type measurementResult struct {
-		Probe struct {
-			Country string `json:"country"`
-			City string `json:"city"`
-			Network string `json:"network"`
-			Location struct {
-				Country string `json:"country"`
-				City string `json:"city"`
-				Network string `json:"network"`
-			} `json:"location"`
-		} `json:"probe"`
-		Result struct {
-			Status string `json:"status"`
-			StatusCode int `json:"statusCode"`
-			StatusCodeName string `json:"statusCodeName"`
-			RawOutput string `json:"rawOutput"`
-			Timings struct { Total float64 `json:"total"` } `json:"timings"`
-		} `json:"result"`
-	}
-	type measurement struct {
-		Status string `json:"status"`
-		Results []measurementResult `json:"results"`
-	}
-	var final measurement
-	pollClient := &http.Client{Transport: tr, Timeout: 4 * time.Second}
-	for i := 0; i < 12; i++ {
-		var wait time.Duration
-		if i == 0 { wait = 250 * time.Millisecond } else { wait = 500 * time.Millisecond }
-		select {
-		case <-ctx.Done():
-			i = 12
-			continue
-		case <-time.After(wait):
-		}
-		getReq, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.globalping.io/v1/measurements/"+created.ID, nil)
-		if reqErr != nil { continue }
-		getReq.Header.Set("Accept", "application/json")
-		getReq.Header.Set("User-Agent", "DNSCheck/1.0")
-		getResp, getErr := pollClient.Do(getReq)
-		if getErr != nil { continue }
-		var current measurement
-		decodeErr := json.NewDecoder(io.LimitReader(getResp.Body, 512<<10)).Decode(&current)
-		getResp.Body.Close()
-		if decodeErr != nil || getResp.StatusCode != http.StatusOK { continue }
-		final = current
-		if current.Status != "in-progress" { break }
-	}
-
-	e := ext{asked: true}
-	rows := make([]Row, 0, len(final.Results))
-	okN := 0
-	var sum float64
-	for _, item := range final.Results {
-		if item.Result.Status == "in-progress" { continue }
-		label := strings.TrimSpace(item.Probe.Location.City + ", " + item.Probe.Location.Country)
-		if label == "," || label == "" { label = item.Probe.Location.Network }
-		if label == "" { label = strings.TrimSpace(item.Probe.City + ", " + item.Probe.Country) }
-		if label == "," { label = item.Probe.Network }
-		if label == "" { label = "Globalping probe" }
-		code := item.Result.StatusCode
-		ok := item.Result.Status == "finished" && code >= 200 && code < 400
-		detail := strings.TrimSpace(fmt.Sprintf("%d %s", code, item.Result.StatusCodeName))
-		if code == 0 { detail = strings.TrimSpace(item.Result.RawOutput) }
-		status := Fail
-		if ok { status = OK; okN++; sum += item.Result.Timings.Total } else if item.Result.Status == "failed" || code == 0 { status = Info }
-		rows = append(rows, Row{Name: "  " + label, Status: status, Detail: detail, Ms: item.Result.Timings.Total})
-		e.total++
-		if ok { e.up++ }
-	}
-	if e.total == 0 {
-		rep.set(rowExt, Info, "Globalping returned no completed probe results; try again", -1)
-		return e
-	}
-	rep.mu.Lock()
-	rep.Rows = append(rep.Rows[:rowExt+1], rows...)
-	rep.mu.Unlock()
-	if e.up == 0 {
-		rep.set(rowExt, Fail, fmt.Sprintf("Unreachable from outside (0 of %d locations)", e.total), -1)
-	} else {
-		avg := -1.0
-		if okN > 0 { avg = sum / float64(okN) }
-		rep.set(rowExt, OK, fmt.Sprintf("Reachable from outside (%d of %d locations)", e.up, e.total), avg)
-	}
-	return e
-}
-
 // ---- Verdict ---------------------------------------------------------------
 
 func Run(ctx context.Context, host string, rep *Report) {
 	start := time.Now()
-	ch := make(chan ext, 1)
-	go func() { ch <- externalCheck(ctx, host, rep) }()
 	l := runLocal(ctx, host, rep)
-	e := <-ch
-
-	v, head, layer, msg := conclude(l, e)
+	v, head, layer, msg := conclude(l)
 	rep.mu.Lock()
 	rep.Verdict, rep.Headline, rep.Layer, rep.Message = v, head, layer, msg
 	rep.TotalMs = ms(time.Since(start))
@@ -752,31 +513,17 @@ func Run(ctx context.Context, host string, rep *Report) {
 	rep.ping()
 }
 
-func conclude(l local, e ext) (Verdict, string, string, string) {
-	extDown := e.asked && e.total > 0 && e.up == 0
-	extUp := e.asked && e.up > 0
-
+func conclude(l local) (Verdict, string, string, string) {
 	localOK := !l.dnsFail && l.pathTested && !l.tcpFail && !l.tlsFail && !l.blockPage && l.httpOK
 	if localOK {
-		m := msgPassed
-		if extDown {
-			m += " Note: the external checker could not reach this site from outside either."
-		}
-		return VAccessible, "ACCESSIBLE", "DNS, firewall, TLS and HTTPS checks all passed", m
-	}
-	if extDown {
-		return VBlocked, "UNREACHABLE", "Down for everyone, not a local block",
-			"The external checker cannot reach this site either, so it is most likely offline or the domain does not exist."
+		return VAccessible, "ACCESSIBLE", "DNS, firewall, TLS and HTTPS checks all passed",
+			msgPassed + " External reachability is not checked automatically; use one of the manual check websites if needed."
 	}
 	switch {
 	case l.dnsFail && !l.pathTested && l.refState == "ok":
 		return VBlocked, "BLOCKED", "Blocked at the DNS level", "This network's DNS refuses or redirects the lookup."
 	case l.dnsFail && !l.pathTested:
-		if extUp {
-			return VBlocked, "BLOCKED", "Blocked at the DNS level (likely)",
-				"This network's DNS gives no answer, but the site is up externally. The public resolver could not be reached to confirm."
-		}
-		return VBlocked, "UNREACHABLE", "Could not resolve the domain", "No DNS answer anywhere. The domain may not exist; the external check was inconclusive."
+		return VBlocked, "UNRESOLVED", "Could not resolve the domain", "DNS returned no usable address. The domain may not exist, or DNS may be blocked. DNSCheck does not test from outside this network."
 	case l.dnsFail && l.tcpFail:
 		return VBlocked, "BLOCKED", "Blocked at DNS and at the firewall", "The DNS lookup is blocked, and a direct connection to the real IP address is blocked as well."
 	case l.dnsFail && l.tlsFail:
@@ -786,13 +533,13 @@ func conclude(l local, e ext) (Verdict, string, string, string) {
 	case l.dnsFail:
 		return VBlocked, "BLOCKED", "Blocked at the DNS level only", "The firewall path is open: a direct connection to the real IP works. Only DNS is blocking this domain."
 	case l.tcpFail:
-		return VBlocked, "BLOCKED", "Blocked at the firewall (IP / port 443)", "DNS resolves normally, but the connection is " + l.tcpDetail + "."
+		return VBlocked, "BLOCKED", "Connection failed (IP / port 443)", "DNS resolves normally, but the connection is " + l.tcpDetail + ". This local result does not prove the site is down for everyone."
 	case l.tlsFail && l.tlsCert:
-		return VBlocked, "BLOCKED", "Intercepted by a filter (certificate)", l.tlsDetail
+		return VBlocked, "BLOCKED", "TLS certificate problem", l.tlsDetail
 	case l.tlsFail:
-		return VBlocked, "BLOCKED", "Blocked at the firewall (SNI / TLS inspection)", "TCP connects, but the secure handshake is cut off, which is typical of deep packet inspection."
+		return VBlocked, "BLOCKED", "TLS handshake failed", "TCP connects, but the secure handshake failed. This does not by itself prove a web filter is responsible."
 	case l.blockPage:
 		return VBlocked, "BLOCKED", "Blocked by a web filter", l.blockDetail
 	}
-	return VBlocked, "BLOCKED", "Request failed", "The site did not return a usable response."
+	return VBlocked, "REQUEST FAILED", "Request failed", "The site did not return a usable response. Use the manual reachability links to compare from another network."
 }
