@@ -99,9 +99,9 @@ func TestFilterSafeIPsKeepsPublicAnswers(t *testing.T) {
 
 func TestLocalBlockEvidenceIsNotOverriddenByExternalFailure(t *testing.T) {
 	localResult := local{blockPage: true, blockDetail: "Block page detected", pathTested: true}
-	verdict, headline, _, _ := conclude(localResult, ext{asked: true, total: 1, up: 0})
-	if verdict != VBlocked || headline != "Blocked by a web filter" {
-		t.Fatalf("conclude() = (%v, %q), want local block diagnosis", verdict, headline)
+	verdict, headline, layer, _ := conclude(localResult, ext{asked: true, total: 1, up: 0})
+	if verdict != VBlocked || headline != "BLOCKED" || layer != "Blocked by a web filter" {
+		t.Fatalf("conclude() = (%v, %q, %q), want local block diagnosis", verdict, headline, layer)
 	}
 }
 
