@@ -378,12 +378,14 @@ func paintAll(dc uintptr, W, H int32) {
 	tx := pl + S(14)
 	switch {
 	case s.Done:
-		idx := 1
-		if s.Verdict == VAccessible {
-			idx = 0
+		if s.Verdict != VNone {
+			idx := 1
+			if s.Verdict == VAccessible {
+				idx = 0
+			}
+			drawEmoji(dc, emoji[idx], pl+S(12), pt+(pb-pt-emojiSize)/2)
+			tx = pl + S(12) + emojiSize + S(16)
 		}
-		drawEmoji(dc, emoji[idx], pl+S(12), pt+(pb-pt-emojiSize)/2)
-		tx = pl + S(12) + emojiSize + S(16)
 		text(dc, s.Headline, tx, pt+S(12), pr-S(10), pt+S(52), fBig, cWhite, dtVCenter|dtSingle)
 		text(dc, s.Layer, tx, pt+S(56), pr-S(10), pb-S(8), fBold, cWhite, dtWordBreak)
 	case s.Host != "":
@@ -401,6 +403,8 @@ func paintAll(dc uintptr, W, H int32) {
 		mc = cRed
 		if s.Verdict == VAccessible {
 			mc = cOKText
+		} else if s.Verdict == VNone {
+			mc = rgb(64, 64, 64)
 		}
 	} else if s.Host == "" && errText != "" {
 		msg, mc = errText, cRed

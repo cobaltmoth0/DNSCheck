@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"regexp"
 	"sort"
@@ -145,9 +146,48 @@ func ParseHost(in string) (string, error) {
 
 func ms(d time.Duration) float64 { return float64(d.Microseconds()) / 1000 }
 
+var reservedPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),
+	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("192.0.0.0/24"),
+	netip.MustParsePrefix("192.0.2.0/24"),
+	netip.MustParsePrefix("192.88.99.0/24"),
+	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("198.51.100.0/24"),
+	netip.MustParsePrefix("203.0.113.0/24"),
+	netip.MustParsePrefix("240.0.0.0/4"),
+	netip.MustParsePrefix("64:ff9b::/96"),
+	netip.MustParsePrefix("100::/64"),
+	netip.MustParsePrefix("64:ff9b:1::/48"),
+	netip.MustParsePrefix("2001::/23"),
+	netip.MustParsePrefix("2001:db8::/32"),
+	netip.MustParsePrefix("2002::/16"),
+}
+
 func isSinkhole(ip net.IP) bool {
-	return !ip.IsGlobalUnicast() || ip.IsUnspecified() || ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
-		ip.IsMulticast() || (ip.To4() != nil && ip.To4()[0] == 100 && ip.To4()[1]&0xC0 == 64)
+	addr, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return true
+	}
+	addr = addr.Unmap()
+	for _, prefix := range reservedPrefixes {
+		if prefix.Contains(addr) {
+			return true
+		}
+	}
+	return !addr.IsGlobalUnicast() || addr.IsUnspecified() || addr.IsLoopback() || addr.IsPrivate() ||
+		addr.IsLinkLocalUnicast() || addr.IsMulticast()
+}
+
+func filterSafeIPs(ips []net.IP) (safe, unsafe []net.IP) {
+	for _, ip := range ips {
+		if isSinkhole(ip) {
+			unsafe = append(unsafe, ip)
+		} else {
+			safe = append(safe, ip)
+		}
+	}
+	return safe, unsafe
 }
 
 func ipList(ips []net.IP) string {
@@ -219,12 +259,11 @@ func lookupSystem(ctx context.Context, host string) dnsResult {
 		res.err = errors.New("empty answer")
 	}
 	if res.err == nil {
-		for _, ip := range ips {
-			if isSinkhole(ip) {
-				res.sinkhole = true
-				break
-			}
-			res.ips = append(res.ips, ip)
+		var unsafe []net.IP
+		res.ips, unsafe = filterSafeIPs(ips)
+		if len(res.ips) == 0 && len(unsafe) > 0 {
+			res.sinkhole = true
+			res.ips = unsafe
 		}
 	}
 	return res
@@ -272,14 +311,8 @@ var errNoAnswer = errors.New("no answer")
 
 func dialAny(ctx context.Context, ips []net.IP) (net.Conn, net.IP, time.Duration, error) {
 	var lastErr error
-	// Never connect to private, loopback, link-local, multicast, or reserved targets,
-	// even when a hostname has a mixture of public and internal DNS answers.
-	safe := make([]net.IP, 0, len(ips))
-	for _, ip := range ips {
-		if !isSinkhole(ip) {
-			safe = append(safe, ip)
-		}
-	}
+	// Apply the same deny policy at the final network boundary.
+	safe, _ := filterSafeIPs(ips)
 	ips = sortV4First(safe)
 	if len(ips) == 0 {
 		return nil, nil, 0, errors.New("no globally routable address")
@@ -516,8 +549,12 @@ func runLocal(ctx context.Context, host string, rep *Report) local {
 
 type ext struct {
 	asked bool
-	up    int // nodes the provider explicitly marked successful
-	total int
+	up    int // probes that returned an HTTP status
+	total int // probes that completed with an HTTP status
+}
+
+func isReachableHTTPResult(status string, code int) bool {
+	return status == "finished" && code >= 100 && code <= 599
 }
 
 func externalCheck(ctx context.Context, host string, rep *Report) ext {
@@ -652,29 +689,30 @@ func externalCheck(ctx context.Context, host string, rep *Report) ext {
 		if label == "," { label = item.Probe.Network }
 		if label == "" { label = "Globalping probe" }
 		code := item.Result.StatusCode
-		ok := item.Result.Status == "finished" && code >= 200 && code < 400
+		reachable := isReachableHTTPResult(item.Result.Status, code)
+		ok := reachable && code >= 200 && code < 400
 		detail := strings.TrimSpace(fmt.Sprintf("%d %s", code, item.Result.StatusCodeName))
 		if code == 0 { detail = strings.TrimSpace(item.Result.RawOutput) }
-		status := Fail
-		if ok { status = OK; okN++; sum += item.Result.Timings.Total } else if item.Result.Status == "failed" || code == 0 { status = Info }
+		status := Info
+		if ok { status = OK }
 		rows = append(rows, Row{Name: "  " + label, Status: status, Detail: detail, Ms: item.Result.Timings.Total})
-		e.total++
-		if ok { e.up++ }
+		if reachable {
+			e.total++
+			e.up++
+			okN++
+			sum += item.Result.Timings.Total
+		}
 	}
 	if e.total == 0 {
-		rep.set(rowExt, Info, "Globalping returned no completed probe results; try again", -1)
+		rep.set(rowExt, Info, "Globalping returned no completed HTTP responses; external reachability is inconclusive", -1)
 		return e
 	}
 	rep.mu.Lock()
 	rep.Rows = append(rep.Rows[:rowExt+1], rows...)
 	rep.mu.Unlock()
-	if e.up == 0 {
-		rep.set(rowExt, Fail, fmt.Sprintf("Unreachable from outside (0 of %d locations)", e.total), -1)
-	} else {
-		avg := -1.0
-		if okN > 0 { avg = sum / float64(okN) }
-		rep.set(rowExt, OK, fmt.Sprintf("Reachable from outside (%d of %d locations)", e.up, e.total), avg)
-	}
+	avg := -1.0
+	if okN > 0 { avg = sum / float64(okN) }
+	rep.set(rowExt, OK, fmt.Sprintf("HTTP response from outside (%d of %d locations)", e.up, e.total), avg)
 	return e
 }
 
@@ -697,20 +735,12 @@ func Run(ctx context.Context, host string, rep *Report) {
 }
 
 func conclude(l local, e ext) (Verdict, string, string, string) {
-	extDown := e.asked && e.total > 0 && e.up == 0
 	extUp := e.asked && e.up > 0
 
 	localOK := !l.dnsFail && l.pathTested && !l.tcpFail && !l.tlsFail && !l.blockPage && l.httpOK
 	if localOK {
 		m := msgPassed
-		if extDown {
-			m += " Note: the external checker could not reach this site from outside either."
-		}
 		return VAccessible, "ACCESSIBLE", "DNS, firewall, TLS and HTTPS checks all passed", m
-	}
-	if extDown {
-		return VBlocked, "UNREACHABLE", "Down for everyone, not a local block",
-			"The external checker cannot reach this site either, so it is most likely offline or the domain does not exist."
 	}
 	switch {
 	case l.dnsFail && !l.pathTested && l.refState == "ok":
@@ -720,23 +750,37 @@ func conclude(l local, e ext) (Verdict, string, string, string) {
 			return VBlocked, "BLOCKED", "Blocked at the DNS level (likely)",
 				"This network's DNS gives no answer, but the site is up externally. The public resolver could not be reached to confirm."
 		}
-		return VBlocked, "UNREACHABLE", "Could not resolve the domain", "No DNS answer anywhere. The domain may not exist; the external check was inconclusive."
+		return VNone, "CHECK INCONCLUSIVE", "Could not resolve the domain", "No usable DNS answer was available; the domain may not exist or DNS may be unavailable."
 	case l.dnsFail && l.tcpFail:
-		return VBlocked, "BLOCKED", "Blocked at DNS and at the firewall", "The DNS lookup is blocked, and a direct connection to the real IP address is blocked as well."
+		if extUp {
+			return VBlocked, "BLOCKED", "DNS and connection failure on this network (likely)", "The external check got an HTTP response, but DNS and TCP checks failed on this network."
+		}
+		return VNone, "CHECK INCONCLUSIVE", "DNS and connection checks failed", "The domain may be unavailable, or this network may be blocking it; external results did not confirm reachability."
+	case l.dnsFail && l.tlsFail && l.tlsCert:
+		return VBlocked, "BLOCKED", "Intercepted by a filter (certificate)", l.tlsDetail
 	case l.dnsFail && l.tlsFail:
-		return VBlocked, "BLOCKED", "Blocked at DNS and at the firewall", "The DNS lookup is blocked, and the firewall also interferes with the secure connection."
+		if extUp {
+			return VBlocked, "BLOCKED", "TLS failure on this network (likely)", "The external check got an HTTP response, but this network could not complete the TLS handshake."
+		}
+		return VNone, "CHECK INCONCLUSIVE", "TLS handshake failed", "The DNS lookup and TLS handshake failed; this does not establish whether the site is down or locally blocked."
 	case l.dnsFail && l.blockPage:
 		return VBlocked, "BLOCKED", "Blocked at DNS and by a web filter", l.blockDetail
 	case l.dnsFail:
 		return VBlocked, "BLOCKED", "Blocked at the DNS level only", "The firewall path is open: a direct connection to the real IP works. Only DNS is blocking this domain."
 	case l.tcpFail:
-		return VBlocked, "BLOCKED", "Blocked at the firewall (IP / port 443)", "DNS resolves normally, but the connection is " + l.tcpDetail + "."
+		if extUp {
+			return VBlocked, "BLOCKED", "Connection failure on this network (likely)", "The external check got an HTTP response, but the local TCP connection failed."
+		}
+		return VNone, "CONNECTION FAILED", "Could not connect to the resolved address", "DNS resolved normally, but the TCP connection failed. This alone does not prove a firewall block."
 	case l.tlsFail && l.tlsCert:
 		return VBlocked, "BLOCKED", "Intercepted by a filter (certificate)", l.tlsDetail
 	case l.tlsFail:
-		return VBlocked, "BLOCKED", "Blocked at the firewall (SNI / TLS inspection)", "TCP connects, but the secure handshake is cut off, which is typical of deep packet inspection."
+		if extUp {
+			return VBlocked, "BLOCKED", "TLS failure on this network (likely)", "The external check got an HTTP response, but this network could not complete the TLS handshake."
+		}
+		return VNone, "TLS FAILED", "The secure connection could not be established", "TCP connected, but the TLS handshake failed. This alone does not identify the cause."
 	case l.blockPage:
 		return VBlocked, "BLOCKED", "Blocked by a web filter", l.blockDetail
 	}
-	return VBlocked, "BLOCKED", "Request failed", "The site did not return a usable response."
+	return VNone, "CHECK INCONCLUSIVE", "Request failed", "The site did not return a usable response; this result does not prove that it is blocked."
 }
