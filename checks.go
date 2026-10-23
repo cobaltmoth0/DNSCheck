@@ -644,6 +644,11 @@ func externalCheck(ctx context.Context, host string, rep *Report) ext {
 			Country string `json:"country"`
 			City string `json:"city"`
 			Network string `json:"network"`
+			Location struct {
+				Country string `json:"country"`
+				City string `json:"city"`
+				Network string `json:"network"`
+			} `json:"location"`
 		} `json:"probe"`
 		Result struct {
 			Status string `json:"status"`
@@ -688,8 +693,10 @@ func externalCheck(ctx context.Context, host string, rep *Report) ext {
 	var sum float64
 	for _, item := range final.Results {
 		if item.Result.Status == "in-progress" { continue }
-		label := strings.TrimSpace(item.Probe.City + ", " + item.Probe.Country)
-		if label == "," || label == "" { label = item.Probe.Network }
+		label := strings.TrimSpace(item.Probe.Location.City + ", " + item.Probe.Location.Country)
+		if label == "," || label == "" { label = item.Probe.Location.Network }
+		if label == "" { label = strings.TrimSpace(item.Probe.City + ", " + item.Probe.Country) }
+		if label == "," { label = item.Probe.Network }
 		if label == "" { label = "Globalping probe" }
 		code := item.Result.StatusCode
 		ok := item.Result.Status == "finished" && code >= 200 && code < 400
