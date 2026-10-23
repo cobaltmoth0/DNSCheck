@@ -583,95 +583,136 @@ type ext struct {
 }
 
 func externalCheck(ctx context.Context, host string, rep *Report) ext {
-	rep.set(rowExt, Running, "Asking check-host.net...", -1)
+	rep.set(rowExt, Running, "Checking from Globalping locations...", -1)
 	tr := noProxyTransport()
 	defer tr.CloseIdleConnections()
-	ctx, cancel := context.WithTimeout(ctx, 48*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 18*time.Second)
 	defer cancel()
 
-	var start struct {
-		OK        int                 `json:"ok"`
-		RequestID string              `json:"request_id"`
-		Nodes     map[string][]string `json:"nodes"`
+	// Globalping is a public, unauthenticated distributed HTTP measurement API.
+	// Request a small number of probes to keep checks quick and within free limits.
+	request := map[string]any{
+		"type": "http",
+		"target": "https://" + host,
+		"limit": 3,
+		"locations": []map[string]any{
+			{"country": "US", "limit": 2},
+			{"country": "DE", "limit": 1},
+		},
+		"inProgressUpdates": true,
+		"timeout": 8,
+		"measurementOptions": map[string]any{
+			"protocol": "HTTPS",
+			"request": map[string]any{"method": "GET"},
+		},
 	}
-	if err := getJSON(ctx, tr, "https://check-host.net/check-http?max_nodes=3&host="+url.QueryEscape("https://"+host), &start); err != nil ||
-		start.OK != 1 || !requestRe.MatchString(start.RequestID) {
-		rep.set(rowExt, Info, "External checker unavailable from this network", -1)
+	body, err := json.Marshal(request)
+	if err != nil {
+		rep.set(rowExt, Info, "External checker could not create request", -1)
+		return ext{}
+	}
+	postReq, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.globalping.io/v1/measurements", strings.NewReader(string(body)))
+	if err != nil {
+		rep.set(rowExt, Info, "External checker could not create request", -1)
+		return ext{}
+	}
+	postReq.Header.Set("Accept", "application/json")
+	postReq.Header.Set("Content-Type", "application/json")
+	postReq.Header.Set("User-Agent", "DNSCheck/1.0")
+	client := &http.Client{Transport: tr, Timeout: 7 * time.Second}
+	resp, err := client.Do(postReq)
+	if err != nil {
+		rep.set(rowExt, Info, "Globalping unavailable from this network", -1)
+		return ext{}
+	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	decodeErr := json.NewDecoder(io.LimitReader(resp.Body, 256<<10)).Decode(&created)
+	resp.Body.Close()
+	if (resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusOK) || decodeErr != nil || created.ID == "" || !regexp.MustCompile(`^[a-zA-Z0-9-]+$`).MatchString(created.ID) {
+		if resp.StatusCode == http.StatusTooManyRequests {
+			rep.set(rowExt, Info, "Globalping rate limit reached; try again shortly", -1)
+		} else {
+			rep.set(rowExt, Info, fmt.Sprintf("Globalping request failed (HTTP %d)", resp.StatusCode), -1)
+		}
 		return ext{}
 	}
 
-	final := map[string]externalNodeResult{}
-	var lastPollErr error
-	validPolls := 0
-	for i := 0; i < 20; i++ {
+	type measurementResult struct {
+		Probe struct {
+			Country string `json:"country"`
+			City string `json:"city"`
+			Network string `json:"network"`
+		} `json:"probe"`
+		Result struct {
+			Status string `json:"status"`
+			StatusCode int `json:"statusCode"`
+			StatusCodeName string `json:"statusCodeName"`
+			RawOutput string `json:"rawOutput"`
+			Timings struct { Total float64 `json:"total"` } `json:"timings"`
+		} `json:"result"`
+	}
+	type measurement struct {
+		Status string `json:"status"`
+		Results []measurementResult `json:"results"`
+	}
+	var final measurement
+	pollClient := &http.Client{Transport: tr, Timeout: 4 * time.Second}
+	for i := 0; i < 12; i++ {
+		var wait time.Duration
+		if i == 0 { wait = 250 * time.Millisecond } else { wait = 500 * time.Millisecond }
 		select {
 		case <-ctx.Done():
-		case <-time.After(2 * time.Second):
-		}
-		if ctx.Err() != nil {
-			break
-		}
-		var raw map[string]json.RawMessage
-		// The extended endpoint explicitly documents the top-level results wrapper.
-		if err := getJSON(ctx, tr, "https://check-host.net/check-result-extended/"+start.RequestID, &raw); err != nil {
-			lastPollErr = err
+			i = 12
 			continue
+		case <-time.After(wait):
 		}
-		validPolls++
-		parsed, pending := parseExternalNodeResults(raw, start.Nodes)
-		for node, result := range parsed {
-			final[node] = result
-		}
-		if pending == 0 && len(final) > 0 {
-			break
-		}
+		getReq, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.globalping.io/v1/measurements/"+created.ID, nil)
+		if reqErr != nil { continue }
+		getReq.Header.Set("Accept", "application/json")
+		getReq.Header.Set("User-Agent", "DNSCheck/1.0")
+		getResp, getErr := pollClient.Do(getReq)
+		if getErr != nil { continue }
+		var current measurement
+		decodeErr := json.NewDecoder(io.LimitReader(getResp.Body, 512<<10)).Decode(&current)
+		getResp.Body.Close()
+		if decodeErr != nil || getResp.StatusCode != http.StatusOK { continue }
+		final = current
+		if current.Status != "in-progress" { break }
 	}
 
-	e := ext{asked: true, total: len(final), up: countExternalSuccesses(final)}
-	keys := make([]string, 0, len(final))
-	var sum float64
-	for k, v := range final {
-		keys = append(keys, k)
-		if v.ok {
-			sum += v.sec * 1000
-		}
-	}
-	sort.Strings(keys)
-	if e.total == 0 {
-		if validPolls == 0 && lastPollErr != nil {
-			rep.set(rowExt, Info, "External checker could not retrieve results (request failed)", -1)
-		} else {
-			rep.set(rowExt, Info, "External checker returned no completed results; try again", -1)
-		}
-		return e
-	}
-	rows := make([]Row, 0, len(keys))
+	e := ext{asked: true}
+	rows := make([]Row, 0, len(final.Results))
 	okN := 0
-	for _, k := range keys {
-		v := final[k]
-		st, det := Fail, v.msg
-		if v.code != "" {
-			det = v.code + " " + v.msg
-		}
-		if v.ok {
-			st = OK
-			okN++
-		} else if v.code != "" {
-			st = Info
-		}
-		rows = append(rows, Row{Name: "  " + v.label, Status: st, Detail: det, Ms: v.sec * 1000})
+	var sum float64
+	for _, item := range final.Results {
+		if item.Result.Status == "in-progress" { continue }
+		label := strings.TrimSpace(item.Probe.City + ", " + item.Probe.Country)
+		if label == "," || label == "" { label = item.Probe.Network }
+		if label == "" { label = "Globalping probe" }
+		code := item.Result.StatusCode
+		ok := item.Result.Status == "finished" && code >= 200 && code < 400
+		detail := strings.TrimSpace(fmt.Sprintf("%d %s", code, item.Result.StatusCodeName))
+		if code == 0 { detail = strings.TrimSpace(item.Result.RawOutput) }
+		status := Fail
+		if ok { status = OK; okN++; sum += item.Result.Timings.Total } else if item.Result.Status == "failed" || code == 0 { status = Info }
+		rows = append(rows, Row{Name: "  " + label, Status: status, Detail: detail, Ms: item.Result.Timings.Total})
+		e.total++
+		if ok { e.up++ }
+	}
+	if e.total == 0 {
+		rep.set(rowExt, Info, "Globalping returned no completed probe results; try again", -1)
+		return e
 	}
 	rep.mu.Lock()
 	rep.Rows = append(rep.Rows[:rowExt+1], rows...)
 	rep.mu.Unlock()
-	switch {
-	case e.up == 0:
+	if e.up == 0 {
 		rep.set(rowExt, Fail, fmt.Sprintf("Unreachable from outside (0 of %d locations)", e.total), -1)
-	default:
+	} else {
 		avg := -1.0
-		if okN > 0 {
-			avg = sum / float64(okN)
-		}
+		if okN > 0 { avg = sum / float64(okN) }
 		rep.set(rowExt, OK, fmt.Sprintf("Reachable from outside (%d of %d locations)", e.up, e.total), avg)
 	}
 	return e
