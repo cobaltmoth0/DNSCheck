@@ -167,6 +167,8 @@ var (
 	cLight  = rgb(223, 223, 223)
 	cNavy   = rgb(0, 0, 128)
 	cBlue   = rgb(0, 0, 255)
+	cGreen  = rgb(0, 128, 0)
+	cYellow = rgb(128, 128, 0)
 	cRed    = rgb(204, 0, 0)
 	cOKText = rgb(0, 0, 204)
 )
@@ -298,6 +300,123 @@ func drawEmoji(dc uintptr, hb uintptr, x, y int32) {
 	pDeleteDC.Call(mdc)
 }
 
+func pipelineStatus(s Report, indices ...int) Status {
+	sawInfo := false
+	for _, i := range indices {
+		if i < 0 || i >= len(s.Rows) {
+			continue
+		}
+		switch s.Rows[i].Status {
+		case Fail:
+			return Fail
+		case Running:
+			return Running
+		case Pending:
+			return Pending
+		case Info:
+			sawInfo = true
+		}
+	}
+	if sawInfo {
+		return Info
+	}
+	return OK
+}
+
+func pipelineColor(st Status) uint32 {
+	switch st {
+	case OK:
+		return cGreen
+	case Fail:
+		return cRed
+	case Running:
+		return cYellow
+	case Info:
+		return cDark
+	default:
+		return cGrey
+	}
+}
+
+func drawPipelineIcon(dc uintptr, kind int, l, t, r, b int32) {
+	switch kind {
+	case 0: // computer
+		ml, mt, mr, mb := l+S(4), t+S(2), r-S(4), t+S(17)
+		fill(dc, ml, mt, mr, mb, cWhite)
+		outline(dc, ml, mt, mr, mb, cBlack)
+		fill(dc, (l+r)/2-S(2), mb, (l+r)/2+S(2), b-S(4), cBlack)
+		fill(dc, l+S(8), b-S(4), r-S(8), b-S(2), cBlack)
+	case 1: // DNS server
+		fill(dc, l+S(6), t+S(1), r-S(6), b-S(1), cWhite)
+		outline(dc, l+S(6), t+S(1), r-S(6), b-S(1), cBlack)
+		for y := t + S(6); y < b-S(3); y += S(8) {
+			fill(dc, l+S(10), y, r-S(10), y+S(3), cBlack)
+		}
+	case 2: // firewall
+		fill(dc, l+S(3), t+S(3), r-S(3), b-S(2), cWhite)
+		outline(dc, l+S(3), t+S(3), r-S(3), b-S(2), cBlack)
+		for row := int32(0); row < 2; row++ {
+			y := t + S(7) + row*S(8)
+			offset := int32(0)
+			if row == 1 {
+				offset = S(5)
+			}
+			for x := l + S(6) + offset; x < r-S(5); x += S(11) {
+				fill(dc, x, y, x+S(8), y+S(4), cBlack)
+			}
+		}
+	case 3: // browser
+		fill(dc, l+S(2), t+S(2), r-S(2), b-S(2), cWhite)
+		outline(dc, l+S(2), t+S(2), r-S(2), b-S(2), cBlack)
+		fill(dc, l+S(3), t+S(3), r-S(3), t+S(8), cBlack)
+		fill(dc, l+S(6), t+S(5), l+S(8), t+S(7), cWhite)
+		fill(dc, l+S(10), t+S(5), l+S(12), t+S(7), cWhite)
+		fill(dc, l+S(7), t+S(12), r-S(7), t+S(14), cBlack)
+		fill(dc, l+S(7), t+S(17), r-S(11), t+S(19), cBlack)
+	}
+}
+
+func drawPipeline(dc uintptr, s Report) {
+	if s.Host == "" {
+		return
+	}
+	states := []Status{
+		pipelineStatus(s, rowDNS),
+		pipelineStatus(s, rowDoH),
+		pipelineStatus(s, rowTCP, rowTLS),
+		pipelineStatus(s, rowHTTP),
+	}
+	labels := [...]string{"PC", "DNS", "FW", "WEB"}
+	const kinds = 4
+	left, top := S(326), S(103)
+	nodeW, nodeH, gap := S(52), S(38), S(18)
+	for i := 0; i < kinds; i++ {
+		x := left + int32(i)*(nodeW+gap)
+		if i > 0 {
+			prev, current := states[i-1], states[i]
+			link := cDark
+			switch {
+			case prev == Fail || current == Fail:
+				link = cRed
+			case prev == OK && current == OK:
+				link = cGreen
+			case prev == OK && current == Running:
+				link = cYellow
+			}
+			ly := top + nodeH/2
+			fill(dc, x-gap+S(3), ly, x-S(3), ly+th(), link)
+			fill(dc, x-S(5), ly-S(3), x-S(2), ly+S(4), link)
+			fill(dc, x-S(3), ly-S(1), x, ly+S(2), link)
+		}
+		col := pipelineColor(states[i])
+		fill(dc, x, top, x+nodeW, top+nodeH, col)
+		raised(dc, x, top, x+nodeW, top+nodeH)
+		drawPipelineIcon(dc, i, x+S(10), top+S(8), x+nodeW-S(10), top+S(28))
+		labelColor := cWhite
+		text(dc, labels[i], x, top+nodeH+S(2), x+nodeW, top+nodeH+S(17), fUI, labelColor, dtCenter|dtVCenter|dtSingle)
+	}
+}
+
 func fmtMs(v float64) string {
 	switch {
 	case v < 0:
@@ -376,6 +495,10 @@ func paintAll(dc uintptr, W, H int32) {
 	fill(dc, pl, pt, pr, pb, panel)
 	sunken(dc, pl, pt, pr, pb)
 	tx := pl + S(14)
+	textRight := pr - S(10)
+	if s.Host != "" {
+		textRight = S(326) - S(8)
+	}
 	switch {
 	case s.Done:
 		if s.Verdict != VNone {
@@ -386,14 +509,15 @@ func paintAll(dc uintptr, W, H int32) {
 			drawEmoji(dc, emoji[idx], pl+S(12), pt+(pb-pt-emojiSize)/2)
 			tx = pl + S(12) + emojiSize + S(16)
 		}
-		text(dc, s.Headline, tx, pt+S(12), pr-S(10), pt+S(52), fBig, cWhite, dtVCenter|dtSingle)
-		text(dc, s.Layer, tx, pt+S(56), pr-S(10), pb-S(8), fBold, cWhite, dtWordBreak)
+		text(dc, s.Headline, tx, pt+S(12), textRight, pt+S(52), fBig, cWhite, dtVCenter|dtSingle)
+		text(dc, s.Layer, tx, pt+S(56), textRight, pb-S(8), fBold, cWhite, dtWordBreak)
 	case s.Host != "":
-		text(dc, "CHECKING...", tx, pt+S(12), pr-S(10), pt+S(52), fBig, cWhite, dtVCenter|dtSingle)
-		text(dc, s.Host, tx, pt+S(56), pr-S(10), pb-S(8), fBold, cWhite, dtWordBreak)
+		text(dc, "CHECKING...", tx, pt+S(12), textRight, pt+S(52), fBig, cWhite, dtVCenter|dtSingle)
+		text(dc, s.Host, tx, pt+S(56), textRight, pb-S(8), fBold, cWhite, dtWordBreak)
 	default:
-		text(dc, "Type a domain name and press Check.", tx, pt, pr-S(10), pb, fBold, cBlack, dtVCenter|dtSingle)
+		text(dc, "Type a domain name and press Check.", tx, pt, textRight, pb, fBold, cBlack, dtVCenter|dtSingle)
 	}
+	drawPipeline(dc, s)
 
 	// message box
 	ml, mt, mr, mb := S(16), S(204), S(winW-16), S(250)
