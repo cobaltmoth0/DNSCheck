@@ -298,45 +298,60 @@ func pipelineLinkColor(previous, current Status) uint32 {
 	}
 }
 
-func drawPipelineIcon(dc uintptr, kind int, l, t, r, b int32, accent uint32) {
+func drawPipelineX(dc uintptr, l, t, r, b int32) {
+	span := r - l
+	for i := int32(0); i < span; i += S(3) {
+		y := t + i*(b-t)/span
+		fill(dc, l+i, y, l+i+S(4), y+S(4), cRed)
+		x := r - S(4) - i
+		fill(dc, x, y, x+S(4), y+S(4), cRed)
+	}
+}
+
+func drawPipelineIcon(dc uintptr, kind int, l, t, r, b int32, st Status) {
+	accent := pipelineAccent(st)
 	switch kind {
 	case 0: // computer
-		ml, mt, mr, mb := l+S(4), t+S(2), r-S(4), t+S(17)
-		fill(dc, ml, mt, mr, mb, cWhite)
+		ml, mt, mr, mb := l+S(3), t+S(2), r-S(3), t+S(24)
+		fill(dc, ml, mt, mr, mb, cLight)
 		outline(dc, ml, mt, mr, mb, cBlack)
-		fill(dc, ml+S(3), mt+S(3), mr-S(3), mb-S(3), accent)
-		fill(dc, (l+r)/2-S(2), mb, (l+r)/2+S(2), b-S(4), cBlack)
-		fill(dc, l+S(8), b-S(4), r-S(8), b-S(2), cBlack)
+		fill(dc, ml+S(4), mt+S(4), mr-S(4), mb-S(3), accent)
+		fill(dc, (l+r)/2-S(3), mb, (l+r)/2+S(3), b-S(5), cDark)
+		fill(dc, l+S(9), b-S(5), r-S(9), b-S(2), cWhite)
+		outline(dc, l+S(9), b-S(5), r-S(9), b-S(2), cBlack)
 	case 1: // DNS server
-		fill(dc, l+S(6), t+S(1), r-S(6), b-S(1), cWhite)
-		outline(dc, l+S(6), t+S(1), r-S(6), b-S(1), cBlack)
-		for y := t + S(6); y < b-S(3); y += S(8) {
-			fill(dc, l+S(10), y, r-S(14), y+S(3), cBlack)
-			fill(dc, r-S(11), y, r-S(7), y+S(3), accent)
+		fill(dc, l+S(7), t+S(1), r-S(7), b-S(1), cLight)
+		outline(dc, l+S(7), t+S(1), r-S(7), b-S(1), cBlack)
+		for y := t + S(7); y < b-S(5); y += S(9) {
+			fill(dc, l+S(11), y, r-S(17), y+S(4), cDark)
+			fill(dc, r-S(13), y, r-S(8), y+S(4), accent)
 		}
 	case 2: // firewall
-		fill(dc, l+S(3), t+S(3), r-S(3), b-S(2), cWhite)
-		outline(dc, l+S(3), t+S(3), r-S(3), b-S(2), cBlack)
-		for row := int32(0); row < 2; row++ {
+		fill(dc, l+S(4), t+S(3), r-S(4), b-S(2), cLight)
+		outline(dc, l+S(4), t+S(3), r-S(4), b-S(2), cBlack)
+		for row := int32(0); row < 3; row++ {
 			y := t + S(7) + row*S(8)
 			offset := int32(0)
-			if row == 1 {
-				offset = S(5)
+			if row%2 == 1 {
+				offset = S(6)
 			}
-			for x := l + S(6) + offset; x < r-S(10); x += S(11) {
-				fill(dc, x, y, x+S(8), y+S(4), cDark)
+			for x := l + S(7) + offset; x < r-S(12); x += S(12) {
+				fill(dc, x, y, x+S(9), y+S(4), cDark)
 			}
 		}
-		fill(dc, r-S(10), t+S(8), r-S(5), t+S(16), accent)
+		fill(dc, r-S(11), t+S(10), r-S(5), t+S(19), accent)
 	case 3: // browser
-		fill(dc, l+S(2), t+S(2), r-S(2), b-S(2), cWhite)
-		outline(dc, l+S(2), t+S(2), r-S(2), b-S(2), cBlack)
-		fill(dc, l+S(3), t+S(3), r-S(3), t+S(8), cLight)
-		fill(dc, l+S(6), t+S(5), l+S(8), t+S(7), cDark)
-		fill(dc, l+S(10), t+S(5), l+S(12), t+S(7), cDark)
-		fill(dc, r-S(10), t+S(4), r-S(5), t+S(8), accent)
-		fill(dc, l+S(7), t+S(12), r-S(7), t+S(14), cDark)
-		fill(dc, l+S(7), t+S(17), r-S(11), t+S(19), cDark)
+		fill(dc, l+S(3), t+S(2), r-S(3), b-S(2), cLight)
+		outline(dc, l+S(3), t+S(2), r-S(3), b-S(2), cBlack)
+		fill(dc, l+S(4), t+S(3), r-S(4), t+S(9), cDark)
+		fill(dc, l+S(8), t+S(5), l+S(11), t+S(8), cWhite)
+		fill(dc, l+S(14), t+S(5), l+S(17), t+S(8), cWhite)
+		fill(dc, r-S(12), t+S(4), r-S(6), t+S(9), accent)
+		fill(dc, l+S(9), t+S(14), r-S(9), t+S(17), cDark)
+		fill(dc, l+S(9), t+S(21), r-S(15), t+S(24), cDark)
+	}
+	if st == Fail {
+		drawPipelineX(dc, l, t, r, b)
 	}
 }
 
@@ -344,22 +359,20 @@ func drawPipeline(dc uintptr, s *Report) {
 	states := pipelinePath(s)
 	labels := [...]string{"PC", "DNS", "FW", "WEB"}
 	const kinds = 4
-	left := S((winW - (4*52 + 3*18)) / 2)
+	left := S((winW - (4*68 + 3*24)) / 2)
 	top := S(132)
-	nodeW, nodeH, gap := S(52), S(32), S(18)
+	nodeW, nodeH, gap := S(68), S(42), S(24)
 	for i := 0; i < kinds; i++ {
 		x := left + int32(i)*(nodeW+gap)
 		if i > 0 {
 			ly := top + nodeH/2
 			link := pipelineLinkColor(states[i-1], states[i])
-			fill(dc, x-gap+S(3), ly, x-S(3), ly+th(), link)
-			fill(dc, x-S(5), ly-S(3), x-S(2), ly+S(4), link)
-			fill(dc, x-S(3), ly-S(1), x, ly+S(2), link)
+			fill(dc, x-gap+S(3), ly, x-S(3), ly+S(2), link)
+			fill(dc, x-S(6), ly-S(4), x-S(2), ly+S(5), link)
+			fill(dc, x-S(4), ly-S(2), x+S(1), ly+S(3), link)
 		}
-		fill(dc, x, top, x+nodeW, top+nodeH, cGrey)
-		raised(dc, x, top, x+nodeW, top+nodeH)
-		drawPipelineIcon(dc, i, x+S(10), top+S(4), x+nodeW-S(10), top+S(28), pipelineAccent(states[i]))
-		text(dc, labels[i], x, top+nodeH+S(2), x+nodeW, top+nodeH+S(17), fUI, cBlack, dtCenter|dtVCenter|dtSingle)
+		drawPipelineIcon(dc, i, x+S(4), top+S(1), x+nodeW-S(4), top+nodeH-S(1), states[i])
+		text(dc, labels[i], x, top+nodeH+S(2), x+nodeW, top+nodeH+S(18), fUI, cBlack, dtCenter|dtVCenter|dtSingle)
 	}
 }
 
@@ -430,22 +443,14 @@ func paintAll(dc uintptr, W, H int32) {
 	// verdict panel
 	pl, pt, pr, pb := S(16), S(88), S(winW-16), S(196)
 	panel := cGrey
-	switch {
-	case s.Done && s.Verdict == VAccessible:
-		panel = cBlue
-	case s.Done && s.Verdict == VBlocked:
-		panel = cRed
-	case s.Host != "":
-		panel = cDark
-	}
 	fill(dc, pl, pt, pr, pb, panel)
 	sunken(dc, pl, pt, pr, pb)
 	title, subtitle := "READY", "Type a domain name and press Check."
 	titleColor := cBlack
 	if s.Done {
-		title, subtitle, titleColor = s.Headline, s.Layer, cWhite
+		title, subtitle = s.Headline, s.Layer
 	} else if s.Host != "" {
-		title, subtitle, titleColor = "CHECKING...", s.Host, cWhite
+		title, subtitle = "CHECKING...", s.Host
 	}
 	text(dc, title, pl+S(8), pt+S(2), pr-S(8), pt+S(28), fBig, titleColor, dtCenter|dtVCenter|dtSingle)
 	text(dc, subtitle, pl+S(8), pt+S(27), pr-S(8), pt+S(43), fUI, titleColor, dtCenter|dtVCenter|dtSingle|dtEllipsis)
