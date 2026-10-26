@@ -3,11 +3,8 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	_ "embed"
 	"fmt"
-	"image/png"
 	"runtime"
 	"strings"
 	"sync/atomic"
@@ -17,17 +14,10 @@ import (
 	"unsafe"
 )
 
-//go:embed assets/allow.png
-var allowPNG []byte
-
-//go:embed assets/block.png
-var blockPNG []byte
-
 var (
-	k32   = syscall.NewLazyDLL("kernel32.dll")
-	u32   = syscall.NewLazyDLL("user32.dll")
-	g32   = syscall.NewLazyDLL("gdi32.dll")
-	msimg = syscall.NewLazyDLL("msimg32.dll")
+	k32 = syscall.NewLazyDLL("kernel32.dll")
+	u32 = syscall.NewLazyDLL("user32.dll")
+	g32 = syscall.NewLazyDLL("gdi32.dll")
 
 	pSetDefaultDllDirs = k32.NewProc("SetDefaultDllDirectories")
 	pGetModuleHandle   = k32.NewProc("GetModuleHandleW")
@@ -74,8 +64,6 @@ var (
 	pSetBkMode       = g32.NewProc("SetBkMode")
 	pSetTextColor    = g32.NewProc("SetTextColor")
 	pGetDeviceCaps   = g32.NewProc("GetDeviceCaps")
-	pCreateDIB       = g32.NewProc("CreateDIBSection")
-	pAlphaBlend      = msimg.NewProc("AlphaBlend")
 )
 
 type wndclassex struct {
@@ -104,15 +92,6 @@ type paintstruct struct {
 	Restore   int32
 	IncUpdate int32
 	Rsv       [32]byte
-}
-type bmih struct {
-	Size           uint32
-	W, H           int32
-	Planes, BitCnt uint16
-	Compression    uint32
-	SizeImage      uint32
-	XPels, YPels   int32
-	ClrUsed, ClrIm uint32
 }
 
 const (
@@ -146,8 +125,6 @@ var (
 	dpi               = 96
 	fUI, fBold, fBig  uintptr
 	icoSmall          uintptr
-	emoji             [2]uintptr // 0 = accessible, 1 = blocked
-	emojiSize         int32
 	brushes           = map[uint32]uintptr{}
 	active            = true
 	pressed           int // 1 minimize, 2 close
@@ -250,62 +227,13 @@ func mkFont(h int32, weight int, face string) uintptr {
 	return must(pCreateFont.Call(uintptr(-h), 0, 0, 0, uintptr(weight), 0, 0, 0, 1, 0, 0, 3, 0, uintptr(unsafe.Pointer(u16(face)))))
 }
 
-// makeEmoji box-filters the source PNG to size x size into a premultiplied 32-bit DIB.
-func makeEmoji(data []byte, size int32) uintptr {
-	img, err := png.Decode(bytes.NewReader(data))
-	if err != nil {
-		return 0
-	}
-	sw := img.Bounds().Dx()
-	bi := bmih{Size: 40, W: size, H: -size, Planes: 1, BitCnt: 32}
-	var bits unsafe.Pointer
-	hb := must(pCreateDIB.Call(0, uintptr(unsafe.Pointer(&bi)), 0, uintptr(unsafe.Pointer(&bits)), 0, 0))
-	if hb == 0 || bits == nil {
-		return 0
-	}
-	buf := unsafe.Slice((*byte)(bits), int(size)*int(size)*4)
-	n := int(size)
-	for y := 0; y < n; y++ {
-		y0, y1 := y*sw/n, (y+1)*sw/n
-		if y1 <= y0 {
-			y1 = y0 + 1
-		}
-		for x := 0; x < n; x++ {
-			x0, x1 := x*sw/n, (x+1)*sw/n
-			if x1 <= x0 {
-				x1 = x0 + 1
-			}
-			var r, g, b, a, c uint64
-			for yy := y0; yy < y1; yy++ {
-				for xx := x0; xx < x1; xx++ {
-					pr, pg, pb, pa := img.At(img.Bounds().Min.X+xx, img.Bounds().Min.Y+yy).RGBA()
-					r, g, b, a, c = r+uint64(pr), g+uint64(pg), b+uint64(pb), a+uint64(pa), c+1
-				}
-			}
-			o := (y*n + x) * 4
-			buf[o], buf[o+1], buf[o+2], buf[o+3] = byte(b/c>>8), byte(g/c>>8), byte(r/c>>8), byte(a/c>>8)
-		}
-	}
-	return hb
-}
-
-func drawEmoji(dc uintptr, hb uintptr, x, y int32) {
-	if hb == 0 {
-		return
-	}
-	mdc := must(pCreateCompatDC.Call(dc))
-	old := must(pSelectObject.Call(mdc, hb))
-	pAlphaBlend.Call(dc, uintptr(x), uintptr(y), uintptr(emojiSize), uintptr(emojiSize), mdc, 0, 0, uintptr(emojiSize), uintptr(emojiSize), 0x01FF0000)
-	pSelectObject.Call(mdc, old)
-	pDeleteDC.Call(mdc)
-}
-
 func pipelineStatus(s *Report, indices ...int) Status {
-	sawInfo := false
+	sawInfo, seen := false, false
 	for _, i := range indices {
 		if i < 0 || i >= len(s.Rows) {
 			continue
 		}
+		seen = true
 		switch s.Rows[i].Status {
 		case Fail:
 			return Fail
@@ -317,13 +245,34 @@ func pipelineStatus(s *Report, indices ...int) Status {
 			sawInfo = true
 		}
 	}
+	if !seen {
+		return Pending
+	}
 	if sawInfo {
 		return Info
 	}
 	return OK
 }
 
-func pipelineColor(st Status) uint32 {
+func pipelinePath(s *Report) [4]Status {
+	states := [4]Status{Pending, Pending, Pending, Pending}
+	if s.Host == "" {
+		return states
+	}
+	states[0] = OK
+	states[1] = pipelineStatus(s, rowDNS, rowDoH)
+	if states[1] != OK {
+		return states
+	}
+	states[2] = pipelineStatus(s, rowTCP, rowTLS)
+	if states[2] != OK {
+		return states
+	}
+	states[3] = pipelineStatus(s, rowHTTP)
+	return states
+}
+
+func pipelineAccent(st Status) uint32 {
 	switch st {
 	case OK:
 		return cGreen
@@ -331,26 +280,39 @@ func pipelineColor(st Status) uint32 {
 		return cRed
 	case Running:
 		return cYellow
-	case Info:
-		return cDark
 	default:
-		return cGrey
+		return cDark
 	}
 }
 
-func drawPipelineIcon(dc uintptr, kind int, l, t, r, b int32) {
+func pipelineLinkColor(previous, current Status) uint32 {
+	switch {
+	case current == Fail:
+		return cRed
+	case previous == Fail || previous != OK:
+		return cDark
+	case current == OK || current == Running:
+		return cGreen
+	default:
+		return cDark
+	}
+}
+
+func drawPipelineIcon(dc uintptr, kind int, l, t, r, b int32, accent uint32) {
 	switch kind {
 	case 0: // computer
 		ml, mt, mr, mb := l+S(4), t+S(2), r-S(4), t+S(17)
 		fill(dc, ml, mt, mr, mb, cWhite)
 		outline(dc, ml, mt, mr, mb, cBlack)
+		fill(dc, ml+S(3), mt+S(3), mr-S(3), mb-S(3), accent)
 		fill(dc, (l+r)/2-S(2), mb, (l+r)/2+S(2), b-S(4), cBlack)
 		fill(dc, l+S(8), b-S(4), r-S(8), b-S(2), cBlack)
 	case 1: // DNS server
 		fill(dc, l+S(6), t+S(1), r-S(6), b-S(1), cWhite)
 		outline(dc, l+S(6), t+S(1), r-S(6), b-S(1), cBlack)
 		for y := t + S(6); y < b-S(3); y += S(8) {
-			fill(dc, l+S(10), y, r-S(10), y+S(3), cBlack)
+			fill(dc, l+S(10), y, r-S(14), y+S(3), cBlack)
+			fill(dc, r-S(11), y, r-S(7), y+S(3), accent)
 		}
 	case 2: // firewall
 		fill(dc, l+S(3), t+S(3), r-S(3), b-S(2), cWhite)
@@ -361,59 +323,43 @@ func drawPipelineIcon(dc uintptr, kind int, l, t, r, b int32) {
 			if row == 1 {
 				offset = S(5)
 			}
-			for x := l + S(6) + offset; x < r-S(5); x += S(11) {
-				fill(dc, x, y, x+S(8), y+S(4), cBlack)
+			for x := l + S(6) + offset; x < r-S(10); x += S(11) {
+				fill(dc, x, y, x+S(8), y+S(4), cDark)
 			}
 		}
+		fill(dc, r-S(10), t+S(8), r-S(5), t+S(16), accent)
 	case 3: // browser
 		fill(dc, l+S(2), t+S(2), r-S(2), b-S(2), cWhite)
 		outline(dc, l+S(2), t+S(2), r-S(2), b-S(2), cBlack)
-		fill(dc, l+S(3), t+S(3), r-S(3), t+S(8), cBlack)
-		fill(dc, l+S(6), t+S(5), l+S(8), t+S(7), cWhite)
-		fill(dc, l+S(10), t+S(5), l+S(12), t+S(7), cWhite)
-		fill(dc, l+S(7), t+S(12), r-S(7), t+S(14), cBlack)
-		fill(dc, l+S(7), t+S(17), r-S(11), t+S(19), cBlack)
+		fill(dc, l+S(3), t+S(3), r-S(3), t+S(8), cLight)
+		fill(dc, l+S(6), t+S(5), l+S(8), t+S(7), cDark)
+		fill(dc, l+S(10), t+S(5), l+S(12), t+S(7), cDark)
+		fill(dc, r-S(10), t+S(4), r-S(5), t+S(8), accent)
+		fill(dc, l+S(7), t+S(12), r-S(7), t+S(14), cDark)
+		fill(dc, l+S(7), t+S(17), r-S(11), t+S(19), cDark)
 	}
 }
 
 func drawPipeline(dc uintptr, s *Report) {
-	if s.Host == "" {
-		return
-	}
-	states := []Status{
-		pipelineStatus(s, rowDNS),
-		pipelineStatus(s, rowDoH),
-		pipelineStatus(s, rowTCP, rowTLS),
-		pipelineStatus(s, rowHTTP),
-	}
+	states := pipelinePath(s)
 	labels := [...]string{"PC", "DNS", "FW", "WEB"}
 	const kinds = 4
-	left, top := S(326), S(103)
-	nodeW, nodeH, gap := S(52), S(38), S(18)
+	left := S((winW - (4*52 + 3*18)) / 2)
+	top := S(132)
+	nodeW, nodeH, gap := S(52), S(32), S(18)
 	for i := 0; i < kinds; i++ {
 		x := left + int32(i)*(nodeW+gap)
 		if i > 0 {
-			prev, current := states[i-1], states[i]
-			link := cDark
-			switch {
-			case prev == Fail || current == Fail:
-				link = cRed
-			case prev == OK && current == OK:
-				link = cGreen
-			case prev == OK && current == Running:
-				link = cYellow
-			}
 			ly := top + nodeH/2
+			link := pipelineLinkColor(states[i-1], states[i])
 			fill(dc, x-gap+S(3), ly, x-S(3), ly+th(), link)
 			fill(dc, x-S(5), ly-S(3), x-S(2), ly+S(4), link)
 			fill(dc, x-S(3), ly-S(1), x, ly+S(2), link)
 		}
-		col := pipelineColor(states[i])
-		fill(dc, x, top, x+nodeW, top+nodeH, col)
+		fill(dc, x, top, x+nodeW, top+nodeH, cGrey)
 		raised(dc, x, top, x+nodeW, top+nodeH)
-		drawPipelineIcon(dc, i, x+S(10), top+S(8), x+nodeW-S(10), top+S(28))
-		labelColor := cWhite
-		text(dc, labels[i], x, top+nodeH+S(2), x+nodeW, top+nodeH+S(17), fUI, labelColor, dtCenter|dtVCenter|dtSingle)
+		drawPipelineIcon(dc, i, x+S(10), top+S(4), x+nodeW-S(10), top+S(28), pipelineAccent(states[i]))
+		text(dc, labels[i], x, top+nodeH+S(2), x+nodeW, top+nodeH+S(17), fUI, cBlack, dtCenter|dtVCenter|dtSingle)
 	}
 }
 
@@ -494,29 +440,15 @@ func paintAll(dc uintptr, W, H int32) {
 	}
 	fill(dc, pl, pt, pr, pb, panel)
 	sunken(dc, pl, pt, pr, pb)
-	tx := pl + S(14)
-	textRight := pr - S(10)
-	if s.Host != "" {
-		textRight = S(326) - S(8)
+	title, subtitle := "READY", "Type a domain name and press Check."
+	titleColor := cBlack
+	if s.Done {
+		title, subtitle, titleColor = s.Headline, s.Layer, cWhite
+	} else if s.Host != "" {
+		title, subtitle, titleColor = "CHECKING...", s.Host, cWhite
 	}
-	switch {
-	case s.Done:
-		if s.Verdict != VNone {
-			idx := 1
-			if s.Verdict == VAccessible {
-				idx = 0
-			}
-			drawEmoji(dc, emoji[idx], pl+S(12), pt+(pb-pt-emojiSize)/2)
-			tx = pl + S(12) + emojiSize + S(16)
-		}
-		text(dc, s.Headline, tx, pt+S(12), textRight, pt+S(52), fBig, cWhite, dtVCenter|dtSingle)
-		text(dc, s.Layer, tx, pt+S(56), textRight, pb-S(8), fBold, cWhite, dtWordBreak)
-	case s.Host != "":
-		text(dc, "CHECKING...", tx, pt+S(12), textRight, pt+S(52), fBig, cWhite, dtVCenter|dtSingle)
-		text(dc, s.Host, tx, pt+S(56), textRight, pb-S(8), fBold, cWhite, dtWordBreak)
-	default:
-		text(dc, "Type a domain name and press Check.", tx, pt, textRight, pb, fBold, cBlack, dtVCenter|dtSingle)
-	}
+	text(dc, title, pl+S(8), pt+S(2), pr-S(8), pt+S(28), fBig, titleColor, dtCenter|dtVCenter|dtSingle)
+	text(dc, subtitle, pl+S(8), pt+S(27), pr-S(8), pt+S(43), fUI, titleColor, dtCenter|dtVCenter|dtSingle|dtEllipsis)
 	drawPipeline(dc, &s)
 
 	// message box
@@ -729,8 +661,6 @@ func main() {
 	fUI = mkFont(S(11), 400, "Microsoft Sans Serif")
 	fBold = mkFont(S(11), 700, "Microsoft Sans Serif")
 	fBig = mkFont(S(26), 700, "Microsoft Sans Serif")
-	emojiSize = S(88)
-	emoji[0], emoji[1] = makeEmoji(allowPNG, emojiSize), makeEmoji(blockPNG, emojiSize)
 
 	icoBig := must(pLoadImage.Call(inst, 1, 1, uintptr(must(pGetSysMetrics.Call(11))), uintptr(must(pGetSysMetrics.Call(12))), 0))
 	icoSmall = must(pLoadImage.Call(inst, 1, 1, uintptr(S(16)), uintptr(S(16)), 0))
