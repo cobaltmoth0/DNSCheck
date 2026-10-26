@@ -10,6 +10,7 @@ on:
       - 'app.manifest'
       - 'app.rc'
       - 'rsrc_windows_amd64.syso'
+      - 'assets/**'
       - '.github/workflows/build-windows.yml'
 
 permissions:

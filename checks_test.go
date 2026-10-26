@@ -97,6 +97,21 @@ func TestFilterSafeIPsKeepsPublicAnswers(t *testing.T) {
 	}
 }
 
+func TestParseDoHIPsIncludesIPv6(t *testing.T) {
+	ips := parseDoHIPs([]dohAnswer{
+		{Type: 28, Data: "2001:4860:4860::8888"},
+		{Type: 1, Data: "8.8.8.8"},
+		{Type: 2, Data: "ignored.example"},
+		{Type: 28, Data: "not-an-ip"},
+	})
+	if len(ips) != 2 {
+		t.Fatalf("parseDoHIPs() returned %v, want two addresses", ips)
+	}
+	if !ips[0].Equal(net.ParseIP("8.8.8.8")) || !ips[1].Equal(net.ParseIP("2001:4860:4860::8888")) {
+		t.Fatalf("parseDoHIPs() = %v, want IPv4-first A and AAAA answers", ips)
+	}
+}
+
 func TestLocalBlockEvidenceIsNotOverriddenByExternalFailure(t *testing.T) {
 	localResult := local{blockPage: true, blockDetail: "Block page detected", pathTested: true}
 	verdict, headline, layer, _ := conclude(localResult, ext{asked: true, total: 1, up: 0})
@@ -104,4 +119,3 @@ func TestLocalBlockEvidenceIsNotOverriddenByExternalFailure(t *testing.T) {
 		t.Fatalf("conclude() = (%v, %q, %q), want local block diagnosis", verdict, headline, layer)
 	}
 }
-

@@ -269,6 +269,37 @@ func lookupSystem(ctx context.Context, host string) dnsResult {
 	return res
 }
 
+type dohAnswer struct {
+	Type int    `json:"type"`
+	Data string `json:"data"`
+}
+
+type dohResponse struct {
+	Status int         `json:"Status"`
+	Answer []dohAnswer `json:"Answer"`
+}
+
+func parseDoHIPs(answers []dohAnswer) []net.IP {
+	ips := make([]net.IP, 0, len(answers))
+	seen := make(map[string]struct{}, len(answers))
+	for _, answer := range answers {
+		if answer.Type != 1 && answer.Type != 28 {
+			continue
+		}
+		ip := net.ParseIP(answer.Data)
+		if ip == nil {
+			continue
+		}
+		key := ip.String()
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		ips = append(ips, ip)
+	}
+	return sortV4First(ips)
+}
+
 func lookupDoH(ctx context.Context, host string) dnsResult {
 	var last dnsResult
 	tr := noProxyTransport()
@@ -277,29 +308,31 @@ func lookupDoH(ctx context.Context, host string) dnsResult {
 		{"1.1.1.1", "https://1.1.1.1/dns-query"},
 		{"8.8.8.8", "https://8.8.8.8/resolve"},
 	} {
-		cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		t := time.Now()
-		var out struct {
-			Status int `json:"Status"`
-			Answer []struct {
-				Type int    `json:"type"`
-				Data string `json:"data"`
-			} `json:"Answer"`
+		start := time.Now()
+		var ips []net.IP
+		var endpointErr error
+		answered := false
+		for _, queryType := range []int{1, 28} {
+			cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			var out dohResponse
+			err := getJSON(cctx, tr, fmt.Sprintf("%s?type=%d&name=%s", ep.base, queryType, url.QueryEscape(host)), &out)
+			cancel()
+			if err != nil {
+				endpointErr = err
+				continue
+			}
+			answered = true
+			ips = append(ips, parseDoHIPs(out.Answer)...)
 		}
-		err := getJSON(cctx, tr, ep.base+"?type=A&name="+url.QueryEscape(host), &out)
-		cancel()
-		res := dnsResult{err: err, d: time.Since(t), via: ep.name}
-		if err == nil {
-			for _, a := range out.Answer {
-				if ip := net.ParseIP(a.Data); a.Type == 1 && ip != nil {
-					res.ips = append(res.ips, ip)
-				}
-			}
-			if len(res.ips) == 0 {
-				res.err = errNoAnswer
-			}
+		res := dnsResult{ips: sortV4First(ips), d: time.Since(start), via: ep.name}
+		if len(ips) > 0 {
 			return res
 		}
+		if answered {
+			res.err = errNoAnswer
+			return res
+		}
+		res.err = endpointErr
 		last = res
 	}
 	return last
@@ -567,17 +600,17 @@ func externalCheck(ctx context.Context, host string, rep *Report) ext {
 	// Globalping is a public, unauthenticated distributed HTTP measurement API.
 	// Request a small number of probes to keep checks quick and within free limits.
 	request := map[string]any{
-		"type": "http",
+		"type":   "http",
 		"target": host,
 		"locations": []map[string]any{
 			{"country": "US", "limit": 2},
 			{"country": "DE", "limit": 1},
 		},
 		"inProgressUpdates": true,
-		"timeout": 8,
+		"timeout":           8,
 		"measurementOptions": map[string]any{
 			"protocol": "HTTPS",
-			"request": map[string]any{"method": "GET"},
+			"request":  map[string]any{"method": "GET"},
 		},
 	}
 	body, err := json.Marshal(request)
@@ -611,7 +644,9 @@ func externalCheck(ctx context.Context, host string, rep *Report) ext {
 			rep.set(rowExt, Info, "Globalping rate limit reached; try again shortly", -1)
 		} else {
 			var apiErr struct {
-				Error struct { Message string `json:"message"` } `json:"error"`
+				Error struct {
+					Message string `json:"message"`
+				} `json:"error"`
 			}
 			_ = json.Unmarshal(responseBody, &apiErr)
 			message := strings.TrimSpace(apiErr.Error.Message)
@@ -626,25 +661,27 @@ func externalCheck(ctx context.Context, host string, rep *Report) ext {
 
 	type measurementResult struct {
 		Probe struct {
-			Country string `json:"country"`
-			City string `json:"city"`
-			Network string `json:"network"`
+			Country  string `json:"country"`
+			City     string `json:"city"`
+			Network  string `json:"network"`
 			Location struct {
 				Country string `json:"country"`
-				City string `json:"city"`
+				City    string `json:"city"`
 				Network string `json:"network"`
 			} `json:"location"`
 		} `json:"probe"`
 		Result struct {
-			Status string `json:"status"`
-			StatusCode int `json:"statusCode"`
+			Status         string `json:"status"`
+			StatusCode     int    `json:"statusCode"`
 			StatusCodeName string `json:"statusCodeName"`
-			RawOutput string `json:"rawOutput"`
-			Timings struct { Total float64 `json:"total"` } `json:"timings"`
+			RawOutput      string `json:"rawOutput"`
+			Timings        struct {
+				Total float64 `json:"total"`
+			} `json:"timings"`
 		} `json:"result"`
 	}
 	type measurement struct {
-		Status string `json:"status"`
+		Status  string              `json:"status"`
 		Results []measurementResult `json:"results"`
 	}
 	var final measurement
@@ -652,7 +689,11 @@ func externalCheck(ctx context.Context, host string, rep *Report) ext {
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	for i := 0; i < 12; i++ {
 		var wait time.Duration
-		if i == 0 { wait = 250 * time.Millisecond } else { wait = 500 * time.Millisecond }
+		if i == 0 {
+			wait = 250 * time.Millisecond
+		} else {
+			wait = 500 * time.Millisecond
+		}
 		select {
 		case <-ctx.Done():
 			i = 12
@@ -660,17 +701,25 @@ func externalCheck(ctx context.Context, host string, rep *Report) ext {
 		case <-time.After(wait):
 		}
 		getReq, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.globalping.io/v1/measurements/"+created.ID, nil)
-		if reqErr != nil { continue }
+		if reqErr != nil {
+			continue
+		}
 		getReq.Header.Set("Accept", "application/json")
 		getReq.Header.Set("User-Agent", "DNSCheck/1.0")
 		getResp, getErr := pollClient.Do(getReq)
-		if getErr != nil { continue }
+		if getErr != nil {
+			continue
+		}
 		var current measurement
 		decodeErr := json.NewDecoder(io.LimitReader(getResp.Body, 512<<10)).Decode(&current)
 		getResp.Body.Close()
-		if decodeErr != nil || getResp.StatusCode != http.StatusOK { continue }
+		if decodeErr != nil || getResp.StatusCode != http.StatusOK {
+			continue
+		}
 		final = current
-		if current.Status != "in-progress" { break }
+		if current.Status != "in-progress" {
+			break
+		}
 	}
 
 	// The request asks for three probes; cap untrusted API output accordingly.
@@ -682,19 +731,33 @@ func externalCheck(ctx context.Context, host string, rep *Report) ext {
 	okN := 0
 	var sum float64
 	for _, item := range final.Results {
-		if item.Result.Status == "in-progress" { continue }
+		if item.Result.Status == "in-progress" {
+			continue
+		}
 		label := strings.TrimSpace(item.Probe.Location.City + ", " + item.Probe.Location.Country)
-		if label == "," || label == "" { label = item.Probe.Location.Network }
-		if label == "" { label = strings.TrimSpace(item.Probe.City + ", " + item.Probe.Country) }
-		if label == "," { label = item.Probe.Network }
-		if label == "" { label = "Globalping probe" }
+		if label == "," || label == "" {
+			label = item.Probe.Location.Network
+		}
+		if label == "" {
+			label = strings.TrimSpace(item.Probe.City + ", " + item.Probe.Country)
+		}
+		if label == "," {
+			label = item.Probe.Network
+		}
+		if label == "" {
+			label = "Globalping probe"
+		}
 		code := item.Result.StatusCode
 		reachable := isReachableHTTPResult(item.Result.Status, code)
 		ok := reachable && code >= 200 && code < 400
 		detail := strings.TrimSpace(fmt.Sprintf("%d %s", code, item.Result.StatusCodeName))
-		if code == 0 { detail = strings.TrimSpace(item.Result.RawOutput) }
+		if code == 0 {
+			detail = strings.TrimSpace(item.Result.RawOutput)
+		}
 		status := Info
-		if ok { status = OK }
+		if ok {
+			status = OK
+		}
 		rows = append(rows, Row{Name: "  " + label, Status: status, Detail: detail, Ms: item.Result.Timings.Total})
 		if reachable {
 			e.total++
@@ -711,7 +774,9 @@ func externalCheck(ctx context.Context, host string, rep *Report) ext {
 	rep.Rows = append(rep.Rows[:rowExt+1], rows...)
 	rep.mu.Unlock()
 	avg := -1.0
-	if okN > 0 { avg = sum / float64(okN) }
+	if okN > 0 {
+		avg = sum / float64(okN)
+	}
 	rep.set(rowExt, OK, fmt.Sprintf("HTTP response from outside (%d of %d locations)", e.up, e.total), avg)
 	return e
 }
