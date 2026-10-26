@@ -300,7 +300,7 @@ func drawEmoji(dc uintptr, hb uintptr, x, y int32) {
 	pDeleteDC.Call(mdc)
 }
 
-func pipelineStatus(s Report, indices ...int) Status {
+func pipelineStatus(s *Report, indices ...int) Status {
 	sawInfo := false
 	for _, i := range indices {
 		if i < 0 || i >= len(s.Rows) {
@@ -376,7 +376,7 @@ func drawPipelineIcon(dc uintptr, kind int, l, t, r, b int32) {
 	}
 }
 
-func drawPipeline(dc uintptr, s Report) {
+func drawPipeline(dc uintptr, s *Report) {
 	if s.Host == "" {
 		return
 	}
@@ -517,7 +517,7 @@ func paintAll(dc uintptr, W, H int32) {
 	default:
 		text(dc, "Type a domain name and press Check.", tx, pt, textRight, pb, fBold, cBlack, dtVCenter|dtSingle)
 	}
-	drawPipeline(dc, s)
+	drawPipeline(dc, &s)
 
 	// message box
 	ml, mt, mr, mb := S(16), S(204), S(winW-16), S(250)
