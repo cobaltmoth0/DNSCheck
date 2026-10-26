@@ -9,6 +9,15 @@ Build from source (Linux or Windows, Go 1.22+, no third-party modules):
 
 To change the icon: replace assets/app.ico (16/32/48/256 px recommended) and rebuild.
 
+Release signing
+---------------
+Windows releases should be Authenticode-signed with a certificate issued by a
+trusted code-signing provider and timestamped before distribution. A SHA-256
+checksum does not establish publisher identity and does not replace a
+signature. The checked-in workflow builds and checksums the executable; signing
+requires a protected certificate and private-key secret that is not stored in
+this repository.
+
 Privacy and network behavior
 ----------------------------
 DNSCheck performs DNS lookups through the computer's configured resolver and
