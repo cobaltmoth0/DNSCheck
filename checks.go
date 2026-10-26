@@ -98,13 +98,13 @@ const (
 )
 
 const (
-	msgPassed = "Network checks passed, if a domain is still blocked this most likely points to GoGuardian."
+	msgPassed = "Network checks passed. If the domain is still blocked, check browser extensions, filtering software, or other local policies."
 	maxBody   = 8192
 )
 
 var (
 	labelRe     = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
-	filterTerms = []string{"goguardian", "securly", "lightspeed", "fortiguard", "fortinet", "iboss",
+	filterTerms = []string{"securly", "lightspeed", "fortiguard", "fortinet", "iboss",
 		"contentkeeper", "smoothwall", "linewize", "forcepoint", "websense", "opendns", "cisco umbrella",
 		"web filter", "content filter", "blocked by", "access denied by"}
 )
