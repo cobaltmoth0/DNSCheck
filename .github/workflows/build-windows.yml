@@ -33,6 +33,10 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Compile Windows resources
+        shell: bash
+        run: windres -O coff -i app.rc -o rsrc_windows_amd64.syso
+
       - name: Test
         run: go test ./...
 
