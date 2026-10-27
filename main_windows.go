@@ -3,8 +3,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	_ "embed"
 	"fmt"
+	"image/png"
 	"runtime"
 	"strings"
 	"sync/atomic"
@@ -18,6 +21,7 @@ var (
 	k32 = syscall.NewLazyDLL("kernel32.dll")
 	u32 = syscall.NewLazyDLL("user32.dll")
 	g32 = syscall.NewLazyDLL("gdi32.dll")
+	m32 = syscall.NewLazyDLL("msimg32.dll")
 
 	pSetDefaultDllDirs = k32.NewProc("SetDefaultDllDirectories")
 	pGetModuleHandle   = k32.NewProc("GetModuleHandleW")
@@ -53,10 +57,10 @@ var (
 	pReleaseDC      = u32.NewProc("ReleaseDC")
 	pGetKeyState    = u32.NewProc("GetKeyState")
 
-	pCreateCompatDC  = g32.NewProc("CreateCompatibleDC")
-	pCreateCompatBmp = g32.NewProc("CreateCompatibleBitmap")
-	pSelectObject    = g32.NewProc("SelectObject")
-	pDeleteObject    = g32.NewProc("DeleteObject")
+	pCreateCompatDC   = g32.NewProc("CreateCompatibleDC")
+	pCreateCompatBmp  = g32.NewProc("CreateCompatibleBitmap")
+	pCreateDIBSection = g32.NewProc("CreateDIBSection")
+	pSelectObject     = g32.NewProc("SelectObject")
 	pDeleteDC        = g32.NewProc("DeleteDC")
 	pBitBlt          = g32.NewProc("BitBlt")
 	pCreateBrush     = g32.NewProc("CreateSolidBrush")
@@ -64,6 +68,7 @@ var (
 	pSetBkMode       = g32.NewProc("SetBkMode")
 	pSetTextColor    = g32.NewProc("SetTextColor")
 	pGetDeviceCaps   = g32.NewProc("GetDeviceCaps")
+	pAlphaBlend      = m32.NewProc("AlphaBlend")
 )
 
 type wndclassex struct {
@@ -92,6 +97,36 @@ type paintstruct struct {
 	Restore   int32
 	IncUpdate int32
 	Rsv       [32]byte
+}
+type bitmapInfoHeader struct {
+	Size          uint32
+	Width         int32
+	Height        int32
+	Planes        uint16
+	BitCount      uint16
+	Compression   uint32
+	SizeImage     uint32
+	XPelsPerMeter int32
+	YPelsPerMeter int32
+	ClrUsed       uint32
+	ClrImportant  uint32
+}
+type bitmapInfo struct {
+	Header bitmapInfoHeader
+	Colors [1]uint32
+}
+type blendFunction struct {
+	BlendOp             byte
+	BlendFlags          byte
+	SourceConstantAlpha byte
+	AlphaFormat         byte
+}
+type pipelineImage struct {
+	dc        uintptr
+	bitmap    uintptr
+	oldBitmap uintptr
+	width     int32
+	height    int32
 }
 
 const (
@@ -134,6 +169,26 @@ var (
 	running           atomic.Bool
 )
 
+//go:embed assets/Computer.png
+var computerPNG []byte
+
+//go:embed assets/dns.png
+var dnsPNG []byte
+
+//go:embed assets/firewall.png
+var firewallPNG []byte
+
+//go:embed assets/internet.png
+var internetPNG []byte
+
+//go:embed assets/connect_fail.png
+var connectFailPNG []byte
+
+var (
+	pipelineIcons     [4]pipelineImage
+	pipelineBlockIcon pipelineImage
+)
+
 func rgb(r, g, b uint32) uint32 { return r | g<<8 | b<<16 }
 
 var (
@@ -145,7 +200,6 @@ var (
 	cNavy   = rgb(0, 0, 128)
 	cBlue   = rgb(0, 0, 255)
 	cGreen  = rgb(0, 128, 0)
-	cYellow = rgb(128, 128, 0)
 	cRed    = rgb(204, 0, 0)
 	cOKText = rgb(0, 0, 204)
 )
@@ -272,18 +326,6 @@ func pipelinePath(s *Report) [4]Status {
 	return states
 }
 
-func pipelineAccent(st Status) uint32 {
-	switch st {
-	case OK:
-		return cGreen
-	case Fail:
-		return cRed
-	case Running:
-		return cYellow
-	default:
-		return cDark
-	}
-}
 
 func pipelineLinkColor(previous, current Status) uint32 {
 	switch {
@@ -298,60 +340,104 @@ func pipelineLinkColor(previous, current Status) uint32 {
 	}
 }
 
-func drawPipelineX(dc uintptr, l, t, r, b int32) {
-	span := r - l
-	for i := int32(0); i < span; i += S(3) {
-		y := t + i*(b-t)/span
-		fill(dc, l+i, y, l+i+S(4), y+S(4), cRed)
-		x := r - S(4) - i
-		fill(dc, x, y, x+S(4), y+S(4), cRed)
+func loadPipelineImage(name string, data []byte) pipelineImage {
+	decoded, err := png.Decode(bytes.NewReader(data))
+	if err != nil {
+		panic(fmt.Sprintf("decode %s: %v", name, err))
 	}
+	bounds := decoded.Bounds()
+	width, height := bounds.Dx(), bounds.Dy()
+	info := bitmapInfo{
+		Header: bitmapInfoHeader{
+			Size:        uint32(unsafe.Sizeof(bitmapInfoHeader{})),
+			Width:       int32(width),
+			Height:      -int32(height),
+			Planes:      1,
+			BitCount:    32,
+			Compression: 0,
+		},
+	}
+	var bits unsafe.Pointer
+	bitmap := must(pCreateDIBSection.Call(0, uintptr(unsafe.Pointer(&info)), 0,
+		uintptr(unsafe.Pointer(&bits)), 0, 0))
+	if bitmap == 0 || bits == nil {
+		panic(fmt.Sprintf("create bitmap for %s failed", name))
+	}
+	pixels := unsafe.Slice((*byte)(bits), width*height*4)
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			r, g, b, a := decoded.At(bounds.Min.X+x, bounds.Min.Y+y).RGBA()
+			alpha := uint32(a >> 8)
+			offset := (y*width + x) * 4
+			pixels[offset] = uint8((uint32(b>>8) * alpha) / 255)
+			pixels[offset+1] = uint8((uint32(g>>8) * alpha) / 255)
+			pixels[offset+2] = uint8((uint32(r>>8) * alpha) / 255)
+			pixels[offset+3] = uint8(alpha)
+		}
+	}
+	dc := must(pCreateCompatDC.Call(0))
+	if dc == 0 {
+		pDeleteObject.Call(bitmap)
+		panic(fmt.Sprintf("create drawing context for %s failed", name))
+	}
+	oldBitmap := must(pSelectObject.Call(dc, bitmap))
+	return pipelineImage{dc: dc, bitmap: bitmap, oldBitmap: oldBitmap,
+		width: int32(width), height: int32(height)}
+}
+
+func loadPipelineImages() {
+	pipelineIcons = [4]pipelineImage{
+		loadPipelineImage(pipelineIconFile(pipelineComputer), computerPNG),
+		loadPipelineImage(pipelineIconFile(pipelineDNS), dnsPNG),
+		loadPipelineImage(pipelineIconFile(pipelineFirewall), firewallPNG),
+		loadPipelineImage(pipelineIconFile(pipelineInternet), internetPNG),
+	}
+	pipelineBlockIcon = loadPipelineImage(pipelineIconFile(pipelineBlock), connectFailPNG)
+}
+
+func releasePipelineImage(img *pipelineImage) {
+	if img.dc != 0 {
+		pSelectObject.Call(img.dc, img.oldBitmap)
+		pDeleteDC.Call(img.dc)
+	}
+	if img.bitmap != 0 {
+		pDeleteObject.Call(img.bitmap)
+	}
+	*img = pipelineImage{}
+}
+
+func releasePipelineImages() {
+	for i := range pipelineIcons {
+		releasePipelineImage(&pipelineIcons[i])
+	}
+	releasePipelineImage(&pipelineBlockIcon)
+}
+
+func drawPipelineImage(dc uintptr, img pipelineImage, l, t, r, b int32) {
+	if img.dc == 0 || r <= l || b <= t {
+		return
+	}
+	blend := blendFunction{SourceConstantAlpha: 255, AlphaFormat: 1}
+	pAlphaBlend.Call(dc, uintptr(l), uintptr(t), uintptr(r-l), uintptr(b-t),
+		img.dc, 0, 0, uintptr(img.width), uintptr(img.height),
+		uintptr(unsafe.Pointer(&blend)))
 }
 
 func drawPipelineIcon(dc uintptr, kind int, l, t, r, b int32, st Status) {
-	accent := pipelineAccent(st)
-	switch kind {
-	case 0: // computer
-		ml, mt, mr, mb := l+S(3), t+S(2), r-S(3), t+S(24)
-		fill(dc, ml, mt, mr, mb, cLight)
-		outline(dc, ml, mt, mr, mb, cBlack)
-		fill(dc, ml+S(4), mt+S(4), mr-S(4), mb-S(3), accent)
-		fill(dc, (l+r)/2-S(3), mb, (l+r)/2+S(3), b-S(5), cDark)
-		fill(dc, l+S(9), b-S(5), r-S(9), b-S(2), cWhite)
-		outline(dc, l+S(9), b-S(5), r-S(9), b-S(2), cBlack)
-	case 1: // DNS server
-		fill(dc, l+S(7), t+S(1), r-S(7), b-S(1), cLight)
-		outline(dc, l+S(7), t+S(1), r-S(7), b-S(1), cBlack)
-		for y := t + S(7); y < b-S(5); y += S(9) {
-			fill(dc, l+S(11), y, r-S(17), y+S(4), cDark)
-			fill(dc, r-S(13), y, r-S(8), y+S(4), accent)
-		}
-	case 2: // firewall
-		fill(dc, l+S(4), t+S(3), r-S(4), b-S(2), cLight)
-		outline(dc, l+S(4), t+S(3), r-S(4), b-S(2), cBlack)
-		for row := int32(0); row < 3; row++ {
-			y := t + S(7) + row*S(8)
-			offset := int32(0)
-			if row%2 == 1 {
-				offset = S(6)
-			}
-			for x := l + S(7) + offset; x < r-S(12); x += S(12) {
-				fill(dc, x, y, x+S(9), y+S(4), cDark)
-			}
-		}
-		fill(dc, r-S(11), t+S(10), r-S(5), t+S(19), accent)
-	case 3: // browser
-		fill(dc, l+S(3), t+S(2), r-S(3), b-S(2), cLight)
-		outline(dc, l+S(3), t+S(2), r-S(3), b-S(2), cBlack)
-		fill(dc, l+S(4), t+S(3), r-S(4), t+S(9), cDark)
-		fill(dc, l+S(8), t+S(5), l+S(11), t+S(8), cWhite)
-		fill(dc, l+S(14), t+S(5), l+S(17), t+S(8), cWhite)
-		fill(dc, r-S(12), t+S(4), r-S(6), t+S(9), accent)
-		fill(dc, l+S(9), t+S(14), r-S(9), t+S(17), cDark)
-		fill(dc, l+S(9), t+S(21), r-S(15), t+S(24), cDark)
+	if kind < 0 || kind >= len(pipelineIcons) {
+		return
 	}
-	if st == Fail {
-		drawPipelineX(dc, l, t, r, b)
+	size := S(32)
+	if width := r - l; width < size {
+		size = width
+	}
+	if height := b - t; height < size {
+		size = height
+	}
+	il, it := l+(r-l-size)/2, t+(b-t-size)/2
+	drawPipelineImage(dc, pipelineIcons[kind], il, it, il+size, it+size)
+	if pipelineNeedsBlockOverlay(st) {
+		drawPipelineImage(dc, pipelineBlockIcon, il, it, il+size, it+size)
 	}
 }
 
@@ -666,6 +752,8 @@ func main() {
 	fUI = mkFont(S(11), 400, "Microsoft Sans Serif")
 	fBold = mkFont(S(11), 700, "Microsoft Sans Serif")
 	fBig = mkFont(S(26), 700, "Microsoft Sans Serif")
+	loadPipelineImages()
+	defer releasePipelineImages()
 
 	icoBig := must(pLoadImage.Call(inst, 1, 1, uintptr(must(pGetSysMetrics.Call(11))), uintptr(must(pGetSysMetrics.Call(12))), 0))
 	icoSmall = must(pLoadImage.Call(inst, 1, 1, uintptr(S(16)), uintptr(S(16)), 0))
