@@ -16,7 +16,7 @@ Enter a domain or URL and DNSCheck runs a series of checks to work out whether t
 
 ## Usage
 
- -Download the latest build from the **Releases**.
+ -Download the latest build from the **[Releases](https://github.com/pcktdrp/DNSCheck/releases)**.\
  -Type a domain or URL and press **Check**.
 
 ## Privacy
