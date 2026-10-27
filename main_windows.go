@@ -62,6 +62,7 @@ var (
 	pCreateDIBSection = g32.NewProc("CreateDIBSection")
 	pSelectObject     = g32.NewProc("SelectObject")
 	pDeleteDC        = g32.NewProc("DeleteDC")
+	pDeleteObject = g32.NewProc("DeleteObject")
 	pBitBlt          = g32.NewProc("BitBlt")
 	pCreateBrush     = g32.NewProc("CreateSolidBrush")
 	pCreateFont      = g32.NewProc("CreateFontW")
