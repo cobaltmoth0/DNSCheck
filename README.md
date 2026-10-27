@@ -26,5 +26,12 @@ Domain names are sent to Cloudflare and Google for public DNS comparison, and to
 
 ## Disclaimer
 
-Results may be affected by filters, caches, proxies and CDNs. Treat them as diagnostic guidance, not a definitive answer.
+Results may be affected by filters, caches, proxies and CDNs. Treat them as diagnostic guidance, not a definitive answer.\
+This network troubleshooting utility was built with AI collaboration to assist with network diagnostics. Please keep the following in mind before downloading:
+
+  -**Unsigned Executable**: This tool does not currently have an expensive code-signing certificate attached.
+
+  -**No Software Reputation**: Security software relies heavily on binary popularity metrics. Newer or niche tools naturally trigger automated alerts.
+    
+  -**False Positives**: Most antivirus programs will flag or block this program upon download.
 
