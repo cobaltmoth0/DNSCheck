@@ -370,9 +370,9 @@ func loadPipelineImage(name string, data []byte) pipelineImage {
 			r, g, b, a := decoded.At(bounds.Min.X+x, bounds.Min.Y+y).RGBA()
 			alpha := uint32(a >> 8)
 			offset := (y*width + x) * 4
-			pixels[offset] = uint8((uint32(b>>8) * alpha) / 255)
-			pixels[offset+1] = uint8((uint32(g>>8) * alpha) / 255)
-			pixels[offset+2] = uint8((uint32(r>>8) * alpha) / 255)
+			pixels[offset] = uint8(b >> 8)
+   			pixels[offset+1] = uint8(g >> 8)
+   			pixels[offset+2] = uint8(r >> 8)
 			pixels[offset+3] = uint8(alpha)
 		}
 	}
@@ -415,14 +415,13 @@ func releasePipelineImages() {
 }
 
 func drawPipelineImage(dc uintptr, img pipelineImage, l, t, r, b int32) {
-	if img.dc == 0 || r <= l || b <= t {
-		return
-	}
-	blend := blendFunction{SourceConstantAlpha: 255, AlphaFormat: 1}
-	pAlphaBlend.Call(dc, uintptr(l), uintptr(t), uintptr(r-l), uintptr(b-t),
-		img.dc, 0, 0, uintptr(img.width), uintptr(img.height),
-		uintptr(unsafe.Pointer(&blend)))
-}
+   	if img.dc == 0 || r <= l || b <= t {
+   		return
+   	}
+   	const blend = 0xFF<<16 | 1<<24
+   	pAlphaBlend.Call(dc, uintptr(l), uintptr(t), uintptr(r-l), uintptr(b-t),
+   		img.dc, 0, 0, uintptr(img.width), uintptr(img.height), blend)
+   }
 
 func drawPipelineIcon(dc uintptr, kind int, l, t, r, b int32, st Status) {
 	if kind < 0 || kind >= len(pipelineIcons) {
